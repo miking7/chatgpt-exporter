@@ -147,8 +147,8 @@ function clearSavedToken(settings) {
 }
 
 // src/cli/commands/backup.ts
-import fs10 from "fs/promises";
-import path11 from "path";
+import fs11 from "fs/promises";
+import path12 from "path";
 import chalk5 from "chalk";
 
 // src/api/pagination.ts
@@ -615,13 +615,13 @@ function extractTextFromParts(parts, fileMap) {
 }
 function getLinearThread(mapping, currentNode) {
   if (currentNode && mapping[currentNode]) {
-    const path14 = [];
+    const path15 = [];
     let nodeId = currentNode;
     while (nodeId && mapping[nodeId]) {
-      path14.unshift(mapping[nodeId]);
+      path15.unshift(mapping[nodeId]);
       nodeId = mapping[nodeId].parent;
     }
-    return path14;
+    return path15;
   }
   let root;
   for (const node of Object.values(mapping)) {
@@ -1557,6 +1557,107 @@ function notify(title, message) {
   });
 }
 
+// src/cli/reminders.ts
+import fs9 from "fs/promises";
+import path9 from "path";
+
+// src/auth/tokens.ts
+var JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
+var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var EXPIRY_SKEW_MS = 6e4;
+function isUuid(value) {
+  return typeof value === "string" && UUID_RE.test(value);
+}
+function decodeJwtPayload(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+    return payload && typeof payload === "object" ? payload : null;
+  } catch {
+    return null;
+  }
+}
+function getTokenInfo(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return null;
+  const auth = payload["https://api.openai.com/auth"] ?? {};
+  const profile = payload["https://api.openai.com/profile"] ?? {};
+  return {
+    exp: typeof payload.exp === "number" ? payload.exp : void 0,
+    email: typeof profile.email === "string" ? profile.email : void 0,
+    accountId: isUuid(auth.chatgpt_account_id) ? auth.chatgpt_account_id : void 0,
+    planType: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : void 0
+  };
+}
+function tokenExpiresAt(token) {
+  const exp = getTokenInfo(token)?.exp;
+  return exp === void 0 ? null : exp * 1e3;
+}
+function isTokenExpired(token, now = Date.now()) {
+  const expiresAt = tokenExpiresAt(token);
+  return expiresAt !== null && expiresAt - EXPIRY_SKEW_MS <= now;
+}
+function pickToken(candidates, now = Date.now()) {
+  const expired = [];
+  for (const candidate of candidates) {
+    if (!JWT_RE.test(candidate.token)) continue;
+    if (isTokenExpired(candidate.token, now)) {
+      expired.push(candidate);
+      continue;
+    }
+    return { chosen: candidate, expired };
+  }
+  return { expired };
+}
+function parseCredentialsText(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    try {
+      const parsed = JSON.parse(trimmed.slice(start, end + 1));
+      if (parsed && typeof parsed === "object") {
+        const obj = parsed;
+        const token2 = typeof obj.accessToken === "string" ? JWT_RE.exec(obj.accessToken)?.[0] : void 0;
+        if (token2) {
+          return { accessToken: token2, accountId: isUuid(obj.accountId) ? obj.accountId : void 0 };
+        }
+      }
+    } catch {
+    }
+  }
+  const keyed = /"accessToken"\s*:\s*"([^"]+)"/.exec(trimmed)?.[1];
+  const token = (keyed && JWT_RE.exec(keyed)?.[0]) ?? JWT_RE.exec(trimmed)?.[0];
+  return token ? { accessToken: token } : null;
+}
+
+// src/cli/reminders.ts
+var EXPIRY_WARNING_MS = 2 * 24 * 36e5;
+var REPEAT_MS = 24 * 36e5;
+async function remindOncePerDay(stateDir, key, message, about = "", send = notify) {
+  const stampPath = path9.join(stateDir, `reminder-${key}.json`);
+  let stamp = {};
+  try {
+    stamp = JSON.parse(await fs9.readFile(stampPath, "utf-8"));
+  } catch {
+  }
+  const due = stamp.about !== about || Date.now() - (stamp.notifiedAt ?? 0) >= REPEAT_MS;
+  if (!due) return false;
+  send("ChatGPT exporter", message);
+  await fs9.mkdir(stateDir, { recursive: true });
+  await fs9.writeFile(stampPath, JSON.stringify({ notifiedAt: Date.now(), about }));
+  return true;
+}
+async function warnIfTokenExpiringSoon(settings, accessToken, send = notify) {
+  const expiresAt = tokenExpiresAt(accessToken);
+  if (expiresAt === null || expiresAt - Date.now() > EXPIRY_WARNING_MS) return null;
+  const message = `Your ChatGPT sign-in expires ${formatRelative(expiresAt)} (${formatDateTime(expiresAt)}). Run \`chatgpt-exporter login\` to keep backups going.`;
+  await remindOncePerDay(settings.stateDir, "token-expiry", message, String(expiresAt), send);
+  return message;
+}
+
 // src/cli/reporter.ts
 import chalk2 from "chalk";
 import cliProgress from "cli-progress";
@@ -1773,7 +1874,7 @@ var PlainReporter = class {
 };
 
 // src/cli/runtime.ts
-import path10 from "path";
+import path11 from "path";
 
 // src/api/client.ts
 import crypto from "crypto";
@@ -1986,8 +2087,8 @@ var ChatGPTClient = class {
 };
 
 // src/api/scheduler.ts
-import fs9 from "fs/promises";
-import path9 from "path";
+import fs10 from "fs/promises";
+import path10 from "path";
 var KINDS = ["conversation", "list", "file"];
 var MAX_SLOWDOWN = 4;
 var MAX_SLEEP_SLICE_MS = 3e4;
@@ -2104,7 +2205,7 @@ var RequestScheduler = class _RequestScheduler {
     if (!this.config.statePath) return;
     let raw;
     try {
-      raw = await fs9.readFile(this.config.statePath, "utf-8");
+      raw = await fs10.readFile(this.config.statePath, "utf-8");
     } catch {
       return;
     }
@@ -2141,10 +2242,10 @@ var RequestScheduler = class _RequestScheduler {
       throttleStreaks: { ...this.throttleStreaks }
     };
     try {
-      await fs9.mkdir(path9.dirname(statePath), { recursive: true });
+      await fs10.mkdir(path10.dirname(statePath), { recursive: true });
       const tmp = `${statePath}.${process.pid}.tmp`;
-      await fs9.writeFile(tmp, JSON.stringify(state, null, 2));
-      await fs9.rename(tmp, statePath);
+      await fs10.writeFile(tmp, JSON.stringify(state, null, 2));
+      await fs10.rename(tmp, statePath);
     } catch {
     }
   }
@@ -2152,78 +2253,6 @@ var RequestScheduler = class _RequestScheduler {
 
 // src/auth/login.ts
 import chalk3 from "chalk";
-
-// src/auth/tokens.ts
-var JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
-var UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var EXPIRY_SKEW_MS = 6e4;
-function isUuid(value) {
-  return typeof value === "string" && UUID_RE.test(value);
-}
-function decodeJwtPayload(token) {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
-    return payload && typeof payload === "object" ? payload : null;
-  } catch {
-    return null;
-  }
-}
-function getTokenInfo(token) {
-  const payload = decodeJwtPayload(token);
-  if (!payload) return null;
-  const auth = payload["https://api.openai.com/auth"] ?? {};
-  const profile = payload["https://api.openai.com/profile"] ?? {};
-  return {
-    exp: typeof payload.exp === "number" ? payload.exp : void 0,
-    email: typeof profile.email === "string" ? profile.email : void 0,
-    accountId: isUuid(auth.chatgpt_account_id) ? auth.chatgpt_account_id : void 0,
-    planType: typeof auth.chatgpt_plan_type === "string" ? auth.chatgpt_plan_type : void 0
-  };
-}
-function tokenExpiresAt(token) {
-  const exp = getTokenInfo(token)?.exp;
-  return exp === void 0 ? null : exp * 1e3;
-}
-function isTokenExpired(token, now = Date.now()) {
-  const expiresAt = tokenExpiresAt(token);
-  return expiresAt !== null && expiresAt - EXPIRY_SKEW_MS <= now;
-}
-function pickToken(candidates, now = Date.now()) {
-  const expired = [];
-  for (const candidate of candidates) {
-    if (!JWT_RE.test(candidate.token)) continue;
-    if (isTokenExpired(candidate.token, now)) {
-      expired.push(candidate);
-      continue;
-    }
-    return { chosen: candidate, expired };
-  }
-  return { expired };
-}
-function parseCredentialsText(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return null;
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    try {
-      const parsed = JSON.parse(trimmed.slice(start, end + 1));
-      if (parsed && typeof parsed === "object") {
-        const obj = parsed;
-        const token2 = typeof obj.accessToken === "string" ? JWT_RE.exec(obj.accessToken)?.[0] : void 0;
-        if (token2) {
-          return { accessToken: token2, accountId: isUuid(obj.accountId) ? obj.accountId : void 0 };
-        }
-      }
-    } catch {
-    }
-  }
-  const keyed = /"accessToken"\s*:\s*"([^"]+)"/.exec(trimmed)?.[1];
-  const token = (keyed && JWT_RE.exec(keyed)?.[0]) ?? JWT_RE.exec(trimmed)?.[0];
-  return token ? { accessToken: token } : null;
-}
 
 // src/utils/clipboard.ts
 import { execFile as execFile2, spawn as spawn2 } from "child_process";
@@ -2373,7 +2402,7 @@ function resolvePacing(settings, flags) {
   return { paceSeconds, burst: Math.max(1, Math.floor(burst)) };
 }
 function rateLimitStatePath(settings) {
-  return path10.join(settings.stateDir, "rate-limit.json");
+  return path11.join(settings.stateDir, "rate-limit.json");
 }
 function schedulerConfig(settings, pacing) {
   return {
@@ -2491,12 +2520,12 @@ function loginHint() {
 function notifyIfUnattended(message) {
   if (!isInteractive()) notify("ChatGPT exporter", message);
 }
-function handleCommandError(error, verbose = false) {
+async function handleCommandError(error, verbose = false) {
   if (error instanceof LoginRequiredError || error instanceof AuthenticationError) {
     console.error(chalk4.red(`
 ${error.message}`));
     console.error(loginHint());
-    notifyIfUnattended("Sign-in needed: run `chatgpt-exporter login`.");
+    notifyIfUnattended("Backups have stopped: your ChatGPT sign-in has expired. Run `chatgpt-exporter login` in Terminal.");
     return EXIT.needsLogin;
   }
   if (error instanceof ThrottledError) {
@@ -2512,6 +2541,19 @@ ChatGPT is still asking us to slow down, so this run stopped.${when}`));
   if (error instanceof AlreadyRunningError) {
     console.error(chalk4.yellow(`
 ${error.message}`));
+    return EXIT.error;
+  }
+  if (error instanceof NetworkError) {
+    console.error(chalk4.red(`
+${error.message}`));
+    console.error("Couldn't reach ChatGPT. If it works from Terminal but not on a schedule, a per-app firewall (such as Little Snitch) may be blocking node when launchd starts it.");
+    if (!isInteractive()) {
+      await remindOncePerDay(
+        configDir(),
+        "network",
+        "Scheduled backup couldn't reach ChatGPT. If it works from Terminal, check that your firewall (e.g. Little Snitch) allows node when run on a schedule."
+      );
+    }
     return EXIT.error;
   }
   console.error(chalk4.red(`
@@ -2604,7 +2646,7 @@ function summaryLine(result) {
 }
 async function loadFailedFiles(output) {
   try {
-    const metadata = JSON.parse(await fs10.readFile(path11.join(output, "metadata.json"), "utf-8"));
+    const metadata = JSON.parse(await fs11.readFile(path12.join(output, "metadata.json"), "utf-8"));
     if (Array.isArray(metadata.failedFiles)) return new Set(metadata.failedFiles);
   } catch {
   }
@@ -2681,7 +2723,14 @@ async function backupCommand(options) {
       `Signed in${email ? ` as ${email}` : ""}${runtime.workspaceId ? ` \xB7 workspace ${runtime.workspaceId}` : ""}` + (expiresAt ? chalk5.dim(` \xB7 token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)})`) : "")
     );
     if (runtime.tokenSource === "environment") {
-      reporter.info(chalk5.dim("  Using CHATGPT_TOKEN from your shell environment (it takes priority over .env)."));
+      reporter.info(chalk5.dim("  Using CHATGPT_TOKEN from your shell environment (it takes priority over config.env)."));
+    }
+    if (!reporter.interactive) {
+      const warning = await warnIfTokenExpiringSoon(settings, runtime.credentials().accessToken);
+      if (warning) {
+        reporter.warn(warning);
+        await storage.appendLog(`Warning: ${warning}`);
+      }
     }
     printSettings(runtime, output, options);
     runtime.scheduler.onWait = (kind, info) => reporter.waiting(kind, info);
@@ -2727,7 +2776,7 @@ async function backupCommand(options) {
         reporter.warn(`File downloads stopped: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (options.downloadFiles) await convertDirectory(output, path11.join(output, "files"));
+    if (options.downloadFiles) await convertDirectory(output, path12.join(output, "files"));
     await updateMetadata(output, {
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       mode: options.full ? "full" : "incremental",
@@ -2761,14 +2810,14 @@ async function backupCommand(options) {
 }
 
 // src/cli/commands/convert.ts
-import fs11 from "fs/promises";
-import path12 from "path";
+import fs12 from "fs/promises";
+import path13 from "path";
 import chalk6 from "chalk";
 async function convertCommand(options) {
   const settings = await loadSettings();
   const output = resolveOutputDir(settings, options.output);
-  const filesDir = path12.join(output, "files");
-  const hasFiles = await fs11.stat(filesDir).then((s) => s.isDirectory(), () => false);
+  const filesDir = path13.join(output, "files");
+  const hasFiles = await fs12.stat(filesDir).then((s) => s.isDirectory(), () => false);
   const result = await convertDirectory(output, hasFiles ? filesDir : void 0);
   console.log(`Converted ${formatCount(result.converted)} conversations to Markdown in ${chalk6.cyan(output)}`);
   if (result.errors > 0) console.log(chalk6.red(`  ${formatCount(result.errors)} couldn't be converted`));
@@ -2888,19 +2937,19 @@ async function projectsCommand(options) {
 }
 
 // src/cli/commands/status.ts
-import fs12 from "fs/promises";
-import path13 from "path";
+import fs13 from "fs/promises";
+import path14 from "path";
 import chalk10 from "chalk";
 async function readJson(file) {
   try {
-    return JSON.parse(await fs12.readFile(file, "utf-8"));
+    return JSON.parse(await fs13.readFile(file, "utf-8"));
   } catch {
     return null;
   }
 }
 async function downloadedIds(dir) {
   try {
-    const files = await fs12.readdir(dir);
+    const files = await fs13.readdir(dir);
     return new Set(files.filter((f) => f.endsWith(".json") && f !== "index.json").map((f) => f.slice(0, -5)));
   } catch {
     return /* @__PURE__ */ new Set();
@@ -2913,7 +2962,7 @@ async function statusCommand(options) {
   const pacing = resolvePacing(settings, {});
   const now = Date.now();
   console.log(chalk10.bold("ChatGPT exporter status"));
-  const configExists = await fs12.stat(settings.configPath).then(() => true, () => false);
+  const configExists = await fs13.stat(settings.configPath).then(() => true, () => false);
   row("Settings", `${settings.configPath}${configExists ? "" : chalk10.dim(" (not created yet)")}`);
   const { chosen, expired } = pickToken(tokenCandidates(settings), now);
   if (chosen) {
@@ -2930,8 +2979,8 @@ async function statusCommand(options) {
   const accountId = getSetting(settings, ENV.accountId);
   if (accountId) row("Workspace", accountId);
   row("Output", `${output}${options.output || isOutputDirConfigured(settings) ? "" : chalk10.dim(" (default; the first backup asks where to keep the archive)")}`);
-  const conversationsDir = path13.join(output, "conversations");
-  const index = await readJson(path13.join(conversationsDir, "index.json"));
+  const conversationsDir = path14.join(output, "conversations");
+  const index = await readJson(path14.join(conversationsDir, "index.json"));
   let missingCount = 0;
   if (!Array.isArray(index)) {
     row("Archive", "no backup here yet");
@@ -2942,7 +2991,7 @@ async function statusCommand(options) {
     const archived = index.filter((c) => c.is_archived).length;
     const done = index.length - missing.length;
     const pct = index.length > 0 ? Math.floor(done / index.length * 100) : 100;
-    const listedAt = (await fs12.stat(path13.join(conversationsDir, "index.json"))).mtimeMs;
+    const listedAt = (await fs13.stat(path14.join(conversationsDir, "index.json"))).mtimeMs;
     row(
       "Archive",
       `${formatCount(done)} of ${formatCount(index.length)} conversations downloaded (${pct}%)` + (archived > 0 ? `, incl. ${formatCount(archived)} archived` : "") + chalk10.dim(` \xB7 as listed ${formatDateTime(listedAt)}`)
@@ -2953,14 +3002,14 @@ async function statusCommand(options) {
       row("To do", `${formatCount(missing.length)} not downloaded yet${range}`);
     }
   }
-  const projectsDir = path13.join(output, "projects");
-  const projectNames = await fs12.readdir(projectsDir).catch(() => []);
+  const projectsDir = path14.join(output, "projects");
+  const projectNames = await fs13.readdir(projectsDir).catch(() => []);
   let projectTotal = 0;
   let projectDone = 0;
   let projectCount = 0;
   for (const name of projectNames) {
-    const dir = path13.join(projectsDir, name, "conversations");
-    const projectIndex = await readJson(path13.join(dir, "index.json"));
+    const dir = path14.join(projectsDir, name, "conversations");
+    const projectIndex = await readJson(path14.join(dir, "index.json"));
     if (!Array.isArray(projectIndex)) continue;
     const have = await downloadedIds(dir);
     projectCount += 1;
@@ -2987,7 +3036,7 @@ async function statusCommand(options) {
   const parked = sync.parkedCount();
   if (parked > 0) row("Parked", `${plural(parked, "conversation")} skipped after repeated failures (backup --retry-failed)`);
   if (sync.state.lastFullListingAt) row("Full listing", formatDateTime(Date.parse(sync.state.lastFullListingAt)));
-  const meta = await readJson(path13.join(output, "metadata.json"));
+  const meta = await readJson(path14.join(output, "metadata.json"));
   if (meta && typeof meta.timestamp === "string") {
     const forkFormat = typeof meta.mode === "string";
     row(
@@ -3001,7 +3050,7 @@ async function statusCommand(options) {
 }
 
 // src/cli/index.ts
-var VERSION = "2.0.0-fork.3";
+var VERSION = "2.0.0-fork.5";
 function positiveNumber(flag) {
   return (value) => {
     const n = Number(value);

@@ -48,24 +48,39 @@ The first page of the conversation list arrives in a few seconds and downloads s
 
 Just run `backup` again. Each run also keeps the Mac awake (`caffeinate`) so an overnight run isn't cut short, though closing the lid still sleeps it.
 
-To run it on a schedule, for example every 4 hours with cron:
+### Running it on a schedule (macOS)
 
-```
-0 */4 * * * /opt/homebrew/bin/chatgpt-exporter backup >> ~/Library/Logs/chatgpt-exporter.log 2>&1
+[`launchd/com.github.miking7.chatgpt-exporter.plist`](launchd/com.github.miking7.chatgpt-exporter.plist) runs `backup` every 4 hours (at 00:15, 04:15, 08:15, 12:15, 16:15 and 20:15). Slots missed while the Mac is asleep run once when it wakes. Install it with the globally installed command in place:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/miking7/chatgpt-exporter/main/launchd/com.github.miking7.chatgpt-exporter.plist | sed "s|CHANGEME|$USER|g" > ~/Library/LaunchAgents/com.github.miking7.chatgpt-exporter.plist
 ```
 
-Use `which chatgpt-exporter` for the right path. Scheduled runs are safe to overlap: a lock stops two backups running at once, and the download allowance is shared and remembered between runs, so frequent runs can't add up to more than the pace allows. On macOS, cron needs Full Disk Access (System Settings → Privacy & Security) to write inside `~/Documents`.
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.miking7.chatgpt-exporter.plist
+```
+
+If `which chatgpt-exporter` isn't `/opt/homebrew/bin/chatgpt-exporter` (Intel Macs: `/usr/local/bin`), edit the path in the file first. Scheduled output goes to `~/Library/Logs/chatgpt-exporter.log`, and the archive's own `backup.log` records every run. To run a backup now: `launchctl kickstart gui/$(id -u)/com.github.miking7.chatgpt-exporter`; to remove the schedule: `launchctl bootout gui/$(id -u)/com.github.miking7.chatgpt-exporter`. On Linux, a cron line such as `15 */4 * * * chatgpt-exporter backup --no-keep-awake >> ~/chatgpt-exporter.log 2>&1` does the same.
+
+Scheduled runs are safe to overlap: a lock stops two backups running at once, and the download allowance is shared and remembered between runs, so frequent runs can't add up to more than the pace allows.
 
 Unattended runs print plain log lines instead of a progress bar, and exit with:
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Done, or `--max-downloads` reached |
-| `2` | Your token expired; run `chatgpt-exporter login` (you also get a macOS notification) |
+| `2` | Your sign-in expired; run `chatgpt-exporter login` |
 | `3` | ChatGPT kept throttling; try again later |
 | `130` | Interrupted with Ctrl+C |
 
-ChatGPT tokens expire after a while (`status` shows when). An interactive run asks you to sign in again and carries on; an unattended one stops with exit code 2.
+### When you need to sign in again
+
+ChatGPT sign-in tokens last about 10 days; `status` shows when yours expires. An interactive run asks you to sign in again and carries on. Unattended runs can't, so on a Mac they warn you:
+
+- From two days before the token expires, a notification once a day: *"Your ChatGPT sign-in expires in …"*.
+- Once it has expired, every scheduled run shows *"Backups have stopped…"*, exits with code 2, and does nothing else until you run `chatgpt-exporter login`.
+
+If notifications don't appear, allow them for **Script Editor** in System Settings → Notifications (that's how command-line tools post them).
 
 ## Where things live
 
@@ -142,6 +157,7 @@ This fork reads the same layout. Run `backup` from the folder that contains your
 ## Troubleshooting
 
 - **"Sign-in needed" / exit code 2:** run `chatgpt-exporter login`.
+- **Scheduled runs can't reach ChatGPT, but it works from Terminal:** a per-app firewall. Little Snitch, for example, allows `node` when you run it from Terminal but not when launchd starts it: add a rule allowing `node` (Homebrew's, under `/opt/homebrew/Cellar/node/…/bin/node`) to connect to `chatgpt.com` on port 443. Unattended runs post a notification once a day while this persists.
 - **"ChatGPT asked us to slow down":** the tool is already pausing. If it happens often, raise `--pace`. `status` shows when the cooldown ends.
 - **The backup stopped overnight:** check `backup.log`. If the Mac went to sleep, the next run carries on; `--no-keep-awake` disables the sleep prevention if you'd rather not have it.
 - **Short Markdown files:** normal for short chats. System messages and internal tool calls are skipped. The `.json` has everything.

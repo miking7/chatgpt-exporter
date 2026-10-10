@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Runs `chatgpt-exporter backup` every 4 hours (at 15 minutes past 00, 04, 08, 12, 16 and 20).
+       Install: copy to ~/Library/LaunchAgents/ then
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.miking7.chatgpt-exporter.plist
+       Run now:   launchctl kickstart gui/$(id -u)/com.github.miking7.chatgpt-exporter
+       Remove:    launchctl bootout gui/$(id -u)/com.github.miking7.chatgpt-exporter
+       Output:    ~/Library/Logs/chatgpt-exporter.log (and backup.log in the archive folder) -->
+  <key>Label</key>
+  <string>com.github.miking7.chatgpt-exporter</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- `which chatgpt-exporter` shows the right path; Homebrew on Intel Macs uses /usr/local/bin. -->
+    <string>/opt/homebrew/bin/chatgpt-exporter</string>
+    <string>backup</string>
+    <!-- Scheduled runs don't hold the Mac awake; a run cut short by sleep resumes at the next slot. -->
+    <string>--no-keep-awake</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd's default PATH has no Homebrew, and the command needs `node`. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Hour</key><integer>0</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>8</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>16</integer><key>Minute</key><integer>15</integer></dict>
+    <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>15</integer></dict>
+  </array>
+
+  <!-- Slots missed while the Mac is asleep run once when it wakes. Set to true to also run at login. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>/Users/CHANGEME/Library/Logs/chatgpt-exporter.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/CHANGEME/Library/Logs/chatgpt-exporter.log</string>
+</dict>
+</plist>

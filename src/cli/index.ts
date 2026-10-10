@@ -8,7 +8,7 @@ import { projectsCommand } from './commands/projects.js';
 import { statusCommand } from './commands/status.js';
 import { CLI_NAME } from './runtime.js';
 
-export const VERSION = '2.0.0-fork.3';
+export const VERSION = '2.0.0-fork.5';
 
 function positiveNumber(flag: string) {
   return (value: string): number => {

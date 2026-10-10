@@ -1,10 +1,12 @@
 import chalk from 'chalk';
-import { AuthenticationError, ThrottledError } from '../api/types.js';
+import { AuthenticationError, NetworkError, ThrottledError } from '../api/types.js';
+import { configDir } from '../config/settings.js';
 import { AlreadyRunningError } from '../utils/lock.js';
 import { isAbortError } from '../utils/time.js';
 import { formatClock } from '../utils/format.js';
 import { isInteractive } from '../utils/prompt.js';
 import { notify } from '../utils/system.js';
+import { remindOncePerDay } from './reminders.js';
 import { CLI_NAME, LoginRequiredError } from './runtime.js';
 
 export const EXIT = {
@@ -24,11 +26,11 @@ export function notifyIfUnattended(message: string): void {
   if (!isInteractive()) notify('ChatGPT exporter', message);
 }
 
-export function handleCommandError(error: unknown, verbose = false): number {
+export async function handleCommandError(error: unknown, verbose = false): Promise<number> {
   if (error instanceof LoginRequiredError || error instanceof AuthenticationError) {
     console.error(chalk.red(`\n${error.message}`));
     console.error(loginHint());
-    notifyIfUnattended('Sign-in needed: run `chatgpt-exporter login`.');
+    notifyIfUnattended('Backups have stopped: your ChatGPT sign-in has expired. Run `chatgpt-exporter login` in Terminal.');
     return EXIT.needsLogin;
   }
   if (error instanceof ThrottledError) {
@@ -42,6 +44,19 @@ export function handleCommandError(error: unknown, verbose = false): number {
   }
   if (error instanceof AlreadyRunningError) {
     console.error(chalk.yellow(`\n${error.message}`));
+    return EXIT.error;
+  }
+  if (error instanceof NetworkError) {
+    console.error(chalk.red(`\n${error.message}`));
+    console.error("Couldn't reach ChatGPT. If it works from Terminal but not on a schedule, a per-app firewall (such as Little Snitch) may be blocking node when launchd starts it.");
+    if (!isInteractive()) {
+      // A firewall rule or an outage can stop scheduled backups silently for days otherwise.
+      await remindOncePerDay(
+        configDir(),
+        'network',
+        "Scheduled backup couldn't reach ChatGPT. If it works from Terminal, check that your firewall (e.g. Little Snitch) allows node when run on a schedule."
+      );
+    }
     return EXIT.error;
   }
   console.error(chalk.red(`\nError: ${error instanceof Error ? error.message : String(error)}`));

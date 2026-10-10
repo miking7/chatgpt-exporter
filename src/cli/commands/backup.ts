@@ -12,6 +12,7 @@ import { chooseOutputDir } from '../output-dir.js';
 import { acquireLock, type Lock } from '../../utils/lock.js';
 import { keepAwake } from '../../utils/system.js';
 import { formatCount, formatDateTime, formatDuration, formatRelative, plural } from '../../utils/format.js';
+import { warnIfTokenExpiringSoon } from '../reminders.js';
 import { createReporter, type Reporter } from '../reporter.js';
 import { createRuntime, describeCredentials, type Runtime } from '../runtime.js';
 import { EXIT, handleCommandError, loginHint, notifyIfUnattended } from '../errors.js';
@@ -218,7 +219,15 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
         (expiresAt ? chalk.dim(` · token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)})`) : '')
     );
     if (runtime.tokenSource === 'environment') {
-      reporter.info(chalk.dim('  Using CHATGPT_TOKEN from your shell environment (it takes priority over .env).'));
+      reporter.info(chalk.dim('  Using CHATGPT_TOKEN from your shell environment (it takes priority over config.env).'));
+    }
+    if (!reporter.interactive) {
+      // Scheduled runs can't ask for a sign-in, so give notice while there's still time.
+      const warning = await warnIfTokenExpiringSoon(settings, runtime.credentials().accessToken);
+      if (warning) {
+        reporter.warn(warning);
+        await storage.appendLog(`Warning: ${warning}`);
+      }
     }
     printSettings(runtime, output, options);
 

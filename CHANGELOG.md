@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.0-fork.5
+
+### Added
+
+- Unattended runs that can't reach ChatGPT post a notification once a day (a per-app firewall such as Little Snitch can block `node` under launchd while Terminal runs work; README has the fix).
+
+## 2.0.0-fork.4
+
+### Added
+
+- Unattended runs warn before the sign-in token expires: a macOS notification once a day from two days out (`reminder-token-expiry.json` in the settings folder remembers the last one), on top of the existing "backups have stopped" notification once it has expired.
+- `launchd/` template for a 4-hourly schedule on macOS, with README instructions.
+
 ## 2.0.0-fork.3
 
 Ready for use from GitHub: `npx github:miking7/chatgpt-exporter backup`, or `npm install -g https://github.com/miking7/chatgpt-exporter/tarball/main` (npm 11's global install of a `github:` package leaves a broken link; the tarball URL or `--install-links` avoids it).
