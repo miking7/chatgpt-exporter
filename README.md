@@ -1,73 +1,107 @@
 # ChatGPT Exporter (paced, incremental fork)
 
-A CLI that backs up your ChatGPT conversations as JSON plus readable Markdown. It works with Team/Business workspaces, which have no "Export data" button.
+Back up your ChatGPT conversations to your own computer, as JSON plus readable Markdown, and keep the backup up to date by re-running one command.
 
-This is a fork of [FdezRomero/chatgpt-exporter](https://github.com/FdezRomero/chatgpt-exporter) v1.1.0. It is built for keeping a **local archive in sync** without ever tripping ChatGPT's rate limits, which would also lock you out of your own chats.
+It works with **Team and Business workspaces**, which have no "Export data" button. It is paced to stay under ChatGPT's rate limits, so a backup running in the background never locks you out of your own chats.
 
-## What's different from upstream
-
-| | Upstream 1.1.0 | This fork |
-| --- | --- | --- |
-| Sign-in | `--token` on every run | `login` saves the token to `.env`; you're asked to sign in again when it expires, even mid-run |
-| Default mode | Re-downloads everything | **Incremental**: new and changed chats first, then fills in older gaps. `--full` forces a re-download |
-| Pacing | 3 parallel requests every 0.5 s | One conversation every **90 s** after a burst of up to **30**, persisted across runs |
-| On HTTP 429 | Retries each chat 5× for ~30 s, ignores `Retry-After`, moves on to the next | Pauses **everything** for 30 min or `Retry-After` (whichever is longer), then halves the pace. Stops after 3 throttles in a row |
-| Listing | All ~28 pages (~3 min) before the first download | Read **alongside** the downloads: downloading starts as soon as the first page arrives. Stops at the first page that hasn't changed since last time (usually 1–2 requests) |
-| Ctrl+C | Ignored while a spinner is showing | Stops gracefully at any point, including via `npm run` |
-| Archived chats | Not backed up | Included (`--no-archived` to skip) |
-| Markdown | Only written when the whole run finishes | Written as each conversation is saved |
-| Project chats | Downloaded twice | Downloaded once, then copied |
-| Long runs | Mac sleeps mid-run | Kept awake with `caffeinate` (`--no-keep-awake` to opt out) |
-| Extras | | `status`, `--max-downloads`, `--since`, `logout`, `convert`, a lock against overlapping runs, skips deleted chats |
-
-### Why 90 seconds?
-
-Measured on a Team account, ChatGPT lets an account open about **200 conversations in a burst, then about 1 per minute**. The web app draws on that same allowance whenever you open a chat. At one download every 90 s (≈40/hour), the backup uses about two-thirds of the refill. That leaves your own browsing its full allowance, even during a 24-hour backfill.
-
-If you know you won't be using ChatGPT (e.g. overnight), `--pace 65` is still under the limit. Anything below 60 s will eventually eat into your own usage, and the tool warns you.
+This is a fork of [FdezRomero/chatgpt-exporter](https://github.com/FdezRomero/chatgpt-exporter). [What's different](#whats-different-from-the-original) is at the end.
 
 ## Quick start
 
-```bash
-npm install
-npm run build
-npm link            # optional: puts `chatgpt-exporter` on your PATH
-```
-
-Then:
+You need [Node.js](https://nodejs.org/) 20.3 or newer (`brew install node` on a Mac).
 
 ```bash
-chatgpt-exporter login      # once; again whenever the token expires
-chatgpt-exporter backup     # incremental, paced; safe to re-run any time
-chatgpt-exporter status     # what's downloaded, what's left, token expiry (no network)
+npx github:miking7/chatgpt-exporter backup
 ```
 
-Without `npm link`, use `npm run login`, `npm run backup` or `npm run status` from this folder, or `node dist/index.js <command>`.
+The first run walks you through two things, then starts downloading:
 
-To keep your archive somewhere other than `./chatgpt-export`, put this in `.env`:
+1. **Signing in.** Open <https://chatgpt.com/api/auth/session> in the browser you use for ChatGPT, copy the whole page (⌘A, ⌘C), and press Enter in the terminal. The token is checked with ChatGPT, saved for later runs, and cleared from your clipboard.
+2. **Where to keep the archive.** Press Enter for `~/Documents/chatgpt-export`, or type another folder.
+
+Run the same command again whenever you like. It picks up where it left off, fetches new and changed conversations first, and then keeps filling in older ones. `npx` fetches the latest version each time.
+
+For regular use (and for scheduling), install it as a command instead:
 
 ```bash
-CHATGPT_EXPORT_DIR="/path/to/chatgpt-export"
+npm install -g https://github.com/miking7/chatgpt-exporter/tarball/main
 ```
 
-## Signing in
+```bash
+chatgpt-exporter backup
+```
 
-`login` walks you through it:
+To update an installed copy, run the install command again. (The tarball URL rather than `github:…` because npm's global install of a git package currently leaves a broken link; `npm install -g --install-links github:miking7/chatgpt-exporter` also works.)
 
-1. In the browser you use for ChatGPT, open <https://chatgpt.com/api/auth/session>.
-2. Copy the whole page (⌘A, ⌘C).
-3. Press Enter in the terminal.
+## How long it takes
 
-The tool reads the token from the clipboard and checks it with ChatGPT. It saves the token to `.env` with owner-only permissions (git-ignored), then clears the clipboard. If the clipboard can't be read, it asks you to paste the token, without echoing it.
+ChatGPT lets an account open roughly **200 conversations in a burst, then about 1 per minute**, and your browser draws on the same allowance whenever you open a chat. So this tool downloads one conversation every **90 seconds** after an initial burst of 30, which is about two-thirds of the refill rate. You can carry on using ChatGPT normally while it runs.
 
-- **Workspaces:** for Team/Business accounts, the workspace id is saved too (as `CHATGPT_ACCOUNT_ID`) and sent as the `ChatGPT-Account-Id` header. That pins backups to that workspace.
-- **Browser console instead:** `login --console` puts a one-line script on your clipboard. Paste it into the console of a chatgpt.com tab (Chrome: ⌥⌘J). It copies the token, plus the workspace you have open, back to the clipboard.
-- **Expiry:** after signing in, the tool shows when the token expires. When it does, an interactive `backup` asks you to sign in again and carries on where it was. An unattended run stops cleanly with exit code 2 and a macOS notification.
-- **Precedence:** `--token` beats `CHATGPT_TOKEN` in your shell environment, which beats `.env`. Expired tokens are skipped.
+- Expect about **40 conversations an hour**: a 1,000-chat history takes about a day, spread over as many runs as you like.
+- Later runs are quick: the list of conversations is only read until it reaches chats that haven't changed, which is usually one or two requests.
+- If you won't be using ChatGPT (overnight, say), `--pace 65` is still under the limit and about 40% faster. Anything below 60 seconds will eventually eat into your own usage.
+- If ChatGPT does ask the tool to slow down, it pauses everything for at least 30 minutes, then continues at half speed. The progress bar shows what's happening.
 
-Browser automation (Playwright and similar) was considered for sign-in. It's left out for now because Google/Microsoft SSO and ChatGPT's bot protection tend to block automated browsers.
+The first page of the conversation list arrives in a few seconds and downloads start right away; the rest of the list is read alongside them.
 
-## Backing up
+## Keeping it up to date
+
+Just run `backup` again. Each run also keeps the Mac awake (`caffeinate`) so an overnight run isn't cut short, though closing the lid still sleeps it.
+
+To run it on a schedule, for example every 4 hours with cron:
+
+```
+0 */4 * * * /opt/homebrew/bin/chatgpt-exporter backup >> ~/Library/Logs/chatgpt-exporter.log 2>&1
+```
+
+Use `which chatgpt-exporter` for the right path. Scheduled runs are safe to overlap: a lock stops two backups running at once, and the download allowance is shared and remembered between runs, so frequent runs can't add up to more than the pace allows. On macOS, cron needs Full Disk Access (System Settings → Privacy & Security) to write inside `~/Documents`.
+
+Unattended runs print plain log lines instead of a progress bar, and exit with:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Done, or `--max-downloads` reached |
+| `2` | Your token expired; run `chatgpt-exporter login` (you also get a macOS notification) |
+| `3` | ChatGPT kept throttling; try again later |
+| `130` | Interrupted with Ctrl+C |
+
+ChatGPT tokens expire after a while (`status` shows when). An interactive run asks you to sign in again and carries on; an unattended one stops with exit code 2.
+
+## Where things live
+
+Settings are kept in a per-user folder, so the tool finds them wherever it's run from:
+
+| | Settings and state |
+| --- | --- |
+| macOS, Linux | `~/.config/chatgpt-exporter/` (or `$XDG_CONFIG_HOME/chatgpt-exporter/`) |
+| Windows | `%APPDATA%\chatgpt-exporter\` |
+
+`config.env` there holds your token (readable only by you) and the archive folder, in `KEY=VALUE` form:
+
+```bash
+CHATGPT_EXPORT_DIR="/Users/you/Documents/chatgpt-export"
+CHATGPT_PACE_SECONDS=90   # optional
+CHATGPT_BURST=30          # optional
+```
+
+Set `CHATGPT_EXPORTER_HOME` to use a different settings folder, e.g. one per workspace.
+
+The archive itself:
+
+```
+chatgpt-export/
+  conversations/
+    index.json            # every conversation (incl. archived), newest first
+    <id>.json             # the full conversation from the API (all branches)
+    <id>.md               # readable Markdown of the current branch
+  projects/<Project_Name>/conversations/   # the same layout per project
+  files/<fileId>/<name>   # with --download-files
+  metadata.json           # summary of the last run
+  backup.log              # what happened, run by run
+  .sync-state.json        # when the list was last read in full; chats that keep failing
+```
+
+## Commands and options
 
 ```bash
 chatgpt-exporter backup [options]
@@ -75,9 +109,9 @@ chatgpt-exporter backup [options]
 
 | Option | Description | Default |
 | --- | --- | --- |
-| `-o, --output <dir>` | Output folder | `CHATGPT_EXPORT_DIR`, else `./chatgpt-export` |
-| `--pace <seconds>` | Average seconds between conversation downloads | `90` (`CHATGPT_PACE_SECONDS`) |
-| `--burst <n>` | Downloads allowed back-to-back after a quiet period | `30` (`CHATGPT_BURST`) |
+| `-o, --output <dir>` | Archive folder for this run | `CHATGPT_EXPORT_DIR` |
+| `--pace <seconds>` | Average seconds between conversation downloads | `90` |
+| `--burst <n>` | Downloads allowed back-to-back after a quiet period | `30` |
 | `--max-downloads <n>` | Stop after this many downloads | no limit |
 | `--since <date>` | Only download chats updated on/after this date (`YYYY-MM-DD`) | everything |
 | `--full` | Re-download every conversation, even unchanged ones | off |
@@ -88,65 +122,62 @@ chatgpt-exporter backup [options]
 | `--project <name-or-id>` | Only back up one project | all |
 | `--no-keep-awake` | Don't run `caffeinate` during the run | keeps the Mac awake |
 | `-t, --token <token>` | Use this token instead of the saved one | |
-| `-v, --verbose` | Also print throttling/retry details | |
+| `-v, --verbose` | Also print throttling and retry details | |
 
-The conversation list is read alongside the downloads, and downloads start as soon as its first page arrives. That page takes ChatGPT about 6 s, and the whole list about 3 minutes. Downloads go newest first, and the progress bar's total grows as later pages are read.
+Ctrl+C stops after the current request (press it twice to quit at once). Every download, throttle event and failure is recorded in `backup.log`.
 
-Each run picks up where the previous one stopped. Ctrl+C stops after the current request (press it twice to quit at once). Progress, every throttle event (with ChatGPT's rate-limit headers) and failures go to `backup.log` in the output folder.
+Other commands:
 
-### Running on a schedule
-
-You can run `backup` from cron or launchd as often as you like. The allowance is shared and persisted, and a lock stops overlapping runs, so frequent runs can't add up to more than the pace allows.
-
-Unattended runs print plain log lines instead of a progress bar. They exit with:
-
-- `0` when done (or `--max-downloads` was reached)
-- `2` when you need to `login`
-- `3` when ChatGPT kept throttling
-- `130` when interrupted
-
-## Other commands
-
-- `status`: sign-in and token expiry, how much is downloaded per folder, the backlog and its ETA, any throttle cooldown, and whether a backup is running. Makes no network requests.
+- `status`: sign-in and token expiry, how much is downloaded, the backlog and its ETA, any throttle cooldown, and whether a backup is running. Makes no network requests.
+- `login [--console]`: save a fresh token. `--console` gives you a one-line script to paste into the browser console of a chatgpt.com tab instead of copying the session page. It also captures the workspace you have open.
+- `logout`: remove the saved token.
 - `list [--archived] [--project <name>] [--json]`: list conversations without downloading.
 - `projects [--json]`: list projects.
 - `convert`: regenerate every `.md` from the saved `.json` files.
-- `logout`: remove the saved token from `.env`.
 
-## Output layout
+## Already have an archive from the original tool?
 
-```
-chatgpt-export/
-  conversations/
-    index.json            # every conversation (incl. archived), newest first
-    <id>.json             # full conversation from the API (all branches)
-    <id>.md               # readable Markdown of the current branch
-  projects/<Project_Name>/conversations/   # same layout per project
-  files/<fileId>/<name>   # with --download-files
-  metadata.json           # summary of the last run
-  backup.log              # what happened, run by run
-  .sync-state.json        # when the list was last read in full; chats that keep failing
-```
-
-The tool's own state lives next to `.env` (in this folder, or `CHATGPT_EXPORTER_HOME`). `.state/rate-limit.json` holds the shared download allowance and any cooldown. `.state/backup.lock` exists while a backup is running.
+This fork reads the same layout. Run `backup` from the folder that contains your `chatgpt-export/` and the first-run question suggests it, or set `CHATGPT_EXPORT_DIR` to it. Conversations you already have are left alone; only new and changed ones are fetched.
 
 ## Troubleshooting
 
 - **"Sign-in needed" / exit code 2:** run `chatgpt-exporter login`.
 - **"ChatGPT asked us to slow down":** the tool is already pausing. If it happens often, raise `--pace`. `status` shows when the cooldown ends.
+- **The backup stopped overnight:** check `backup.log`. If the Mac went to sleep, the next run carries on; `--no-keep-awake` disables the sleep prevention if you'd rather not have it.
 - **Short Markdown files:** normal for short chats. System messages and internal tool calls are skipped. The `.json` has everything.
 
-## Privacy & Security
+## Privacy & security
 
-This tool runs entirely on your machine. It only talks to OpenAI's servers (`chatgpt.com`), using your session token to call the same API the ChatGPT web app uses. There is no telemetry, no analytics, no third-party services, and nothing is sent anywhere else. The token is stored only in `.env` (mode 600, git-ignored), and the clipboard is cleared after `login` reads it.
+This tool runs entirely on your machine. It only talks to OpenAI's servers (`chatgpt.com`), using your session token to call the same API the ChatGPT web app uses. There is no telemetry, no analytics, no third-party services, and nothing is sent anywhere else. The token is stored only in `config.env` (mode 600, in your settings folder, never inside the archive), and the clipboard is cleared after `login` reads it.
+
+## What's different from the original
+
+| | Original 1.1.0 | This fork |
+| --- | --- | --- |
+| Sign-in | `--token` on every run | `login` saves the token; you're asked to sign in again when it expires, even mid-run |
+| Default mode | Re-downloads everything | **Incremental**: new and changed chats first, then older gaps. `--full` forces a re-download |
+| Pacing | 3 parallel requests every 0.5 s | One conversation every **90 s** after a burst of 30, shared and persisted across runs |
+| On HTTP 429 | Retries each chat 5× for ~30 s, ignores `Retry-After`, moves on | Pauses **everything** for 30 min or `Retry-After` (whichever is longer), then halves the pace. Stops after 3 throttles in a row |
+| Listing | All ~28 pages (~3 min) before the first download | Read alongside the downloads; stops at the first unchanged page |
+| Settings and archive | `--token` flag; archive relative to the current folder | Per-user settings folder; absolute archive folder chosen once |
+| Ctrl+C | Ignored while a spinner is showing | Stops gracefully at any point |
+| Archived chats | Not backed up | Included |
+| Markdown | Only written when the whole run finishes | Written as each conversation is saved |
+| Project chats | Downloaded twice | Downloaded once, then copied |
+| Extras | | `status`, `--max-downloads`, `--since`, `logout`, `convert`, a lock against overlapping runs, deleted chats aren't retried forever |
 
 ## Development
 
 ```bash
+git clone https://github.com/miking7/chatgpt-exporter.git
+cd chatgpt-exporter
 npm install
-npm run typecheck   # source and tests
-npm test            # unit + integration tests against a local mock ChatGPT server
 npm run dev -- backup --pace 65
+npm run typecheck    # source and tests
+npm test             # against a local mock ChatGPT server
+npm run build        # dist/index.js is committed: rebuild it before committing changes to src/
 ```
 
-The tests run against `test/helpers/mock-chatgpt.ts`. It emulates ChatGPT's server-side limiter (a burst, slow refill, then 429 with `Retry-After`), so they can check that the pacing never triggers it.
+`dist/index.js` is checked in so that installing straight from GitHub needs no build step (npm can't run build scripts for global installs of git packages). A test fails if it goes stale.
+
+The tests run against `test/helpers/mock-chatgpt.ts`, which emulates ChatGPT's limiter (a burst, slow refill, then 429 with `Retry-After`), so they can check that the pacing never triggers it. Terminal behaviour (Ctrl+C, the first-run prompt) is tested in a real pseudo-terminal.

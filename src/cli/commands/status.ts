@@ -3,7 +3,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 import type { ConversationItem } from '../../api/types.js';
 import { getTokenInfo, pickToken, tokenExpiresAt } from '../../auth/tokens.js';
-import { ENV, getSetting, loadSettings, resolveOutputDir } from '../../config/settings.js';
+import { ENV, getSetting, isOutputDirConfigured, loadSettings, resolveOutputDir } from '../../config/settings.js';
 import { SyncStateStore } from '../../services/sync-state.js';
 import { lockHolder } from '../../utils/lock.js';
 import { toEpochSeconds } from '../../utils/time.js';
@@ -45,8 +45,8 @@ export async function statusCommand(options: { output?: string }): Promise<numbe
   const now = Date.now();
 
   console.log(chalk.bold('ChatGPT exporter status'));
-  const envExists = await fs.stat(settings.envPath).then(() => true, () => false);
-  row('Settings', `${settings.envPath}${envExists ? '' : chalk.dim(' (not created yet)')}`);
+  const configExists = await fs.stat(settings.configPath).then(() => true, () => false);
+  row('Settings', `${settings.configPath}${configExists ? '' : chalk.dim(' (not created yet)')}`);
 
   const { chosen, expired } = pickToken(tokenCandidates(settings), now);
   if (chosen) {
@@ -65,7 +65,7 @@ export async function statusCommand(options: { output?: string }): Promise<numbe
   const accountId = getSetting(settings, ENV.accountId);
   if (accountId) row('Workspace', accountId);
 
-  row('Output', output);
+  row('Output', `${output}${options.output || isOutputDirConfigured(settings) ? '' : chalk.dim(' (default; the first backup asks where to keep the archive)')}`);
   const conversationsDir = path.join(output, 'conversations');
   const index = await readJson<ConversationItem[]>(path.join(conversationsDir, 'index.json'));
   let missingCount = 0;

@@ -1,8 +1,6 @@
 node_modules/
-dist/
 chatgpt-export/
 *.log
 .env
-.state/
 .DS_Store
 .claude

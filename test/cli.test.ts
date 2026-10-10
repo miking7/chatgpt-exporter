@@ -40,13 +40,41 @@ test('CLI: unattended backup without a token exits 2 and says to log in', async 
   }
 });
 
-test('CLI: backup reads token and output folder from .env, then status summarises it', async () => {
+test('CLI: a fresh user with nothing configured gets ~/Documents/chatgpt-export, saved for later runs', { skip: process.platform === 'win32' }, async () => {
+  const token = fakeJwt();
+  const mock = await startMockServer({ token, conversations: makeConversations(2) });
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-home-'));
+  try {
+    await fs.mkdir(path.join(home, 'Documents'));
+    await fs.mkdir(path.join(home, '.config', 'chatgpt-exporter'), { recursive: true });
+    await fs.writeFile(path.join(home, '.config', 'chatgpt-exporter', 'config.env'), `CHATGPT_TOKEN=${token}\n`);
+    // HOME decides both the config folder (~/.config) and the default archive folder; no overrides set.
+    const env = { HOME: home, XDG_CONFIG_HOME: '', CHATGPT_EXPORTER_HOME: '', CHATGPT_BASE_URL: mock.url };
+
+    const backup = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
+    assert.equal(backup.code, 0, backup.stderr + backup.stdout);
+    const archive = path.join(home, 'Documents', 'chatgpt-export');
+    assert.equal((await fs.readdir(path.join(archive, 'conversations'))).filter((f) => f.endsWith('.md')).length, 2);
+    const config = await fs.readFile(path.join(home, '.config', 'chatgpt-exporter', 'config.env'), 'utf-8');
+    assert.match(config, new RegExp(`CHATGPT_EXPORT_DIR=${archive}`), 'default saved so later runs stay put');
+    assert.match(config, /^CHATGPT_TOKEN=/m, 'token kept');
+    assert.match(backup.stdout, /Archive folder saved to/);
+
+    const status = await runCli(['status'], env);
+    assert.match(status.stdout, new RegExp(`Output +${archive}\\s*$`, 'm'), 'no longer marked as default');
+  } finally {
+    await mock.close();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('CLI: backup reads token and output folder from config.env, then status summarises it', async () => {
   const token = fakeJwt({ email: 'me@example.com' });
   const mock = await startMockServer({ token, conversations: makeConversations(4) });
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-home-'));
   const out = path.join(home, 'my export');
   try {
-    await fs.writeFile(path.join(home, '.env'), `CHATGPT_TOKEN=${token}\nCHATGPT_EXPORT_DIR="${out}"\n`);
+    await fs.writeFile(path.join(home, 'config.env'), `CHATGPT_TOKEN=${token}\nCHATGPT_EXPORT_DIR="${out}"\n`);
     const env = { CHATGPT_EXPORTER_HOME: home, CHATGPT_BASE_URL: mock.url };
 
     const backup = await runCli(['backup', '--pace', '0.05', '--burst', '10', '--no-keep-awake'], env);
@@ -79,7 +107,7 @@ test('CLI: backup reads token and output folder from .env, then status summarise
 test('CLI: an expired saved token is reported instead of used', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-home-'));
   try {
-    await fs.writeFile(path.join(home, '.env'), `CHATGPT_TOKEN=${fakeJwt({ expiresInSeconds: -3600 })}\n`);
+    await fs.writeFile(path.join(home, 'config.env'), `CHATGPT_TOKEN=${fakeJwt({ expiresInSeconds: -3600 })}\n`);
     const result = await runCli(['backup', '--no-keep-awake', '-o', path.join(home, 'out')], { CHATGPT_EXPORTER_HOME: home });
     assert.equal(result.code, 2);
     assert.match(result.stderr, /expired on/);

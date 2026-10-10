@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.0.0-fork.3
+
+Ready for use from GitHub: `npx github:miking7/chatgpt-exporter backup`, or `npm install -g https://github.com/miking7/chatgpt-exporter/tarball/main` (npm 11's global install of a `github:` package leaves a broken link; the tarball URL or `--install-links` avoids it).
+
+### Changed
+
+- Settings moved from `.env` next to the package to a per-user folder: `~/.config/chatgpt-exporter/config.env` (`$XDG_CONFIG_HOME`, or `%APPDATA%\chatgpt-exporter` on Windows). Under `npx` the package folder is the npm cache, which is hidden, wiped by `npm cache clean`, and different for every version. The rate-limit state and lock live there too. `CHATGPT_EXPORTER_HOME` still overrides the folder.
+- The archive folder is no longer relative to the current directory (a second run from elsewhere would have started a second archive and spent the whole download allowance). The first run asks where to keep it, suggesting `~/Documents/chatgpt-export` (or `./chatgpt-export` if an archive from the original tool is there), and saves the answer. Unattended runs take the default.
+- `dist/index.js` is committed, so `npx github:…` and `npm install -g github:…` work without a registry release or a build step (npm can't run `prepare` for global installs of git packages). A test fails if it goes stale.
+- README rewritten for first-time users.
+
 ## 2.0.0-fork.2
 
 ### Changed

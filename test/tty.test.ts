@@ -13,12 +13,51 @@ import { fakeJwt, makeConversations, startMockServer } from './helpers/mock-chat
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hasPython = spawnSync('python3', ['-c', 'import pty'], { stdio: 'ignore' }).status === 0;
 
+test('first run asks where to keep the archive and accepts Enter for the suggestion', { skip: !hasPython && 'needs python3' }, async () => {
+  const token = fakeJwt();
+  const mock = await startMockServer({ token, conversations: makeConversations(3) });
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'tty-'));
+  try {
+    await fs.writeFile(path.join(home, 'config.env'), `CHATGPT_TOKEN=${token}\n`);
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, CHATGPT_EXPORTER_HOME: home, CHATGPT_BASE_URL: mock.url };
+    delete env.CHATGPT_TOKEN;
+    delete env.CHATGPT_EXPORT_DIR;
+    const child = spawn(
+      'python3',
+      ['-I', path.join(root, 'test/helpers/pty_run.py'), process.execPath, '--import', 'tsx', path.join(root, 'src/index.ts'), 'backup', '--no-keep-awake', '--pace', '0.05'],
+      { cwd: root, env }
+    );
+    let output = '';
+    child.stdout.on('data', (d) => (output += d));
+
+    const deadline = Date.now() + 20_000;
+    while (!output.includes('Archive folder [') && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.match(output, new RegExp(`Archive folder \\[${path.join(home, 'chatgpt-export')}\\]`), 'suggests ~/chatgpt-export (no Documents folder here)');
+    child.stdin.write('\r');
+
+    const code = await new Promise<number | null>((resolve) => {
+      const killer = setTimeout(() => child.kill('SIGKILL'), 20_000);
+      child.on('close', (c) => {
+        clearTimeout(killer);
+        resolve(c);
+      });
+    });
+    assert.equal(code, 0, output);
+    assert.match(output, /Backup finished/);
+    assert.match(await fs.readFile(path.join(home, 'config.env'), 'utf-8'), /CHATGPT_EXPORT_DIR=/);
+    assert.equal((await fs.readdir(path.join(home, 'chatgpt-export', 'conversations'))).filter((f) => f.endsWith('.json')).length, 4);
+  } finally {
+    await mock.close();
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
 test('Ctrl+C typed in a terminal during the listing stops the backup gracefully', { skip: !hasPython && 'needs python3' }, async () => {
   const token = fakeJwt();
   const mock = await startMockServer({ token, conversations: makeConversations(1000), listDelayMs: 3_000 });
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'tty-'));
   try {
-    await fs.writeFile(path.join(home, '.env'), `CHATGPT_TOKEN=${token}\n`);
+    await fs.writeFile(path.join(home, 'config.env'), `CHATGPT_TOKEN=${token}\n`);
     const env: NodeJS.ProcessEnv = {
       ...process.env,
       CHATGPT_EXPORTER_HOME: home,

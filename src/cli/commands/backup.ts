@@ -7,7 +7,8 @@ import { downloadFiles, scanAllConversations } from '../../services/file-service
 import { convertDirectory } from '../../services/markdown-service.js';
 import { StorageService, updateMetadata } from '../../services/storage-service.js';
 import { SyncStateStore } from '../../services/sync-state.js';
-import { loadSettings, resolveOutputDir } from '../../config/settings.js';
+import { loadSettings } from '../../config/settings.js';
+import { chooseOutputDir } from '../output-dir.js';
 import { acquireLock, type Lock } from '../../utils/lock.js';
 import { keepAwake } from '../../utils/system.js';
 import { formatCount, formatDateTime, formatDuration, formatRelative, plural } from '../../utils/format.js';
@@ -191,7 +192,7 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
 
   try {
     const settings = await loadSettings();
-    const output = resolveOutputDir(settings, options.output);
+    const output = await chooseOutputDir(settings, options.output);
     lock = await acquireLock(settings.stateDir);
 
     const storage = new StorageService(output);

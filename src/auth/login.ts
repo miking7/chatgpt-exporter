@@ -120,7 +120,7 @@ export async function interactiveLogin(options: LoginOptions): Promise<Credentia
     if (expiresAt) {
       console.log(`  Token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)}); you'll be asked to sign in again after that.`);
     }
-    console.log(chalk.dim(`  Saved to ${options.settings.envPath} (readable only by you)${read.fromClipboard ? '; clipboard cleared' : ''}.`));
+    console.log(chalk.dim(`  Saved to ${options.settings.configPath} (readable only by you)${read.fromClipboard ? '; clipboard cleared' : ''}.`));
     return verified.credentials;
   }
 
