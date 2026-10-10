@@ -2,7 +2,5 @@
 
 import { createCli } from './cli/index.js';
 
-process.on('SIGINT', () => process.exit(130));
-
-const program = createCli();
-program.parse();
+// Commands set process.exitCode and handle Ctrl+C themselves (backup stops after the current step).
+await createCli().parseAsync(process.argv);

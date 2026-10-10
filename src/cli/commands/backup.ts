@@ -1,381 +1,303 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import chalk from 'chalk';
-import ora from 'ora';
-import { ChatGPTClient } from '../../api/client.js';
-import {
-  BackupService,
-  type BackupResult
-} from '../../services/backup-service.js';
-import {
-  scanAllConversations,
-  downloadFiles
-} from '../../services/file-service.js';
+import type { ChatGPTClient } from '../../api/client.js';
+import { BackupService, type BackupPlan, type BackupResult, type StopReason } from '../../services/backup-service.js';
+import { downloadFiles, scanAllConversations } from '../../services/file-service.js';
 import { convertDirectory } from '../../services/markdown-service.js';
-import { StorageService } from '../../services/storage-service.js';
-import { createProgressBar } from '../../utils/progress.js';
+import { StorageService, updateMetadata } from '../../services/storage-service.js';
+import { SyncStateStore } from '../../services/sync-state.js';
+import { loadSettings, resolveOutputDir } from '../../config/settings.js';
+import { acquireLock, type Lock } from '../../utils/lock.js';
+import { keepAwake } from '../../utils/system.js';
+import { formatCount, formatDateTime, formatDuration, formatRelative, plural } from '../../utils/format.js';
+import { createReporter, type Reporter } from '../reporter.js';
+import { createRuntime, describeCredentials, type Runtime } from '../runtime.js';
+import { EXIT, handleCommandError, loginHint, notifyIfUnattended } from '../errors.js';
 
 export interface BackupCommandOptions {
-  token: string;
-  output: string;
-  concurrency: number;
-  delay: number;
-  incremental: boolean;
+  token?: string;
+  output?: string;
+  full: boolean;
+  refreshList: boolean;
+  archived: boolean;
+  since?: number;
+  maxDownloads?: number;
+  pace?: number;
+  burst?: number;
+  retryFailed: boolean;
   downloadFiles: boolean;
-  verbose: boolean;
   project?: string;
+  keepAwake: boolean;
+  verbose: boolean;
 }
 
-function runBackupWithProgress(
-  service: BackupService,
-  spinner: ReturnType<typeof ora>,
-  options: {
-    concurrency: number;
-    delay: number;
-    incremental: boolean;
-    verbose: boolean;
-    projectGizmoId?: string;
-  }
-): Promise<BackupResult> {
-  let listProgressBar: ReturnType<typeof createProgressBar> | null = null;
-  let downloadProgressBar: ReturnType<typeof createProgressBar> | null = null;
-  let listingDone = false;
+const STOP_MESSAGES: Record<StopReason, string> = {
+  'max-downloads': 'reached --max-downloads',
+  throttled: 'ChatGPT kept asking us to slow down',
+  auth: 'the ChatGPT token stopped working',
+  interrupted: 'stopped by Ctrl+C',
+  'too-many-failures': 'several conversations failed in a row',
+};
 
-  return service
-    .backup({
-      ...options,
-      onListProgress: (fetched, totalList) => {
-        if (!listingDone) {
-          if (!listProgressBar) {
-            spinner.stop();
-            listProgressBar = createProgressBar(totalList, 'Listing    ');
-          }
-          listProgressBar.setTotal(totalList);
-          listProgressBar.update(fetched);
-
-          if (fetched >= totalList) {
-            listProgressBar.stop();
-            listingDone = true;
-            console.log();
-          }
-        }
-      },
-      onDownloadProgress: (completed, totalDownload) => {
-        if (listingDone) {
-          if (!downloadProgressBar) {
-            downloadProgressBar = createProgressBar(
-              totalDownload,
-              'Downloading'
-            );
-          }
-          downloadProgressBar.update(completed);
-        }
-      },
-      onError: (id, error) => {
-        if (options.verbose) {
-          console.error(
-            chalk.red(`\nFailed to download ${id}: ${error.message}`)
-          );
-        }
-      }
-    })
-    .then(result => {
-      downloadProgressBar?.stop();
-      return result;
-    });
-}
-
-export async function backupCommand(
-  options: BackupCommandOptions
-): Promise<void> {
-  const {
-    token,
-    output,
-    concurrency,
-    delay,
-    incremental,
-    downloadFiles: shouldDownloadFiles,
-    verbose,
-    project
-  } = options;
-
-  const client = new ChatGPTClient(token, { verbose });
-  const spinner = ora('Authenticating...').start();
-
-  try {
-    await client.initialize();
-    spinner.succeed('Authenticated');
-
-    console.log(chalk.dim(`\nBackup settings:`));
-    console.log(chalk.dim(`  Output: ${output}`));
-    console.log(chalk.dim(`  Concurrency: ${concurrency}`));
-    console.log(chalk.dim(`  Delay: ${delay}ms`));
-    console.log(chalk.dim(`  Incremental: ${incremental}`));
-    console.log(chalk.dim(`  Download files: ${shouldDownloadFiles}`));
-    if (project) {
-      console.log(chalk.dim(`  Project: ${project}`));
-    }
-    console.log();
-
-    if (project) {
-      // Single project backup
-      const baseService = new BackupService(client, new StorageService(output));
-      spinner.start('Resolving project...');
-      const { gizmoId, name } = await baseService.resolveProjectId(project);
-      spinner.succeed(`Project: ${name}`);
-
-      const storage = new StorageService(output, name);
-      const service = new BackupService(client, storage);
-
-      spinner.start(`Backing up project "${name}"...`);
-      const result = await runBackupWithProgress(service, spinner, {
-        concurrency,
-        delay,
-        incremental,
-        verbose,
-        projectGizmoId: gizmoId
-      });
-
-      if (shouldDownloadFiles) {
-        await runFileDownloads(client, output, { concurrency, delay, verbose });
-      }
-
-      const filesDir = shouldDownloadFiles
-        ? path.join(output, 'files')
-        : undefined;
-      const md = await convertDirectory(output, filesDir);
-
-      printResult(result, output);
-      console.log(`Converted ${md.converted} conversations to markdown.`);
-      if (md.errors > 0) {
-        console.log(`Markdown conversion errors: ${chalk.red(md.errors)}`);
-      }
-    } else {
-      // Full backup: main conversations + all projects
-      let totalDownloaded = 0;
-      let totalSkipped = 0;
-      let totalFailed = 0;
-      let totalConversations = 0;
-
-      // 1. Main conversations
-      console.log(chalk.bold('Main conversations\n'));
-      const mainStorage = new StorageService(output);
-      const mainService = new BackupService(client, mainStorage);
-
-      spinner.start('Fetching conversation list...');
-      const mainResult = await runBackupWithProgress(mainService, spinner, {
-        concurrency,
-        delay,
-        incremental,
-        verbose
-      });
-
-      totalDownloaded += mainResult.downloaded;
-      totalSkipped += mainResult.skipped;
-      totalFailed += mainResult.failed;
-      totalConversations += mainResult.totalConversations;
-
-      console.log();
-      console.log(
-        `  Downloaded: ${chalk.green(mainResult.downloaded)}, Skipped: ${chalk.yellow(mainResult.skipped)}, Failed: ${chalk.red(mainResult.failed)}`
-      );
-      console.log();
-
-      // 2. Projects
-      spinner.start('Fetching projects...');
-      const projects = await mainService.listProjects();
-      spinner.succeed(`Found ${projects.length} projects`);
-
-      for (const proj of projects) {
-        const name = proj.gizmo.display.name;
-        const gizmoId = proj.gizmo.id;
-
-        console.log();
-        console.log(chalk.bold(`Project: ${name}\n`));
-
-        const projStorage = new StorageService(output, name);
-        const projService = new BackupService(client, projStorage);
-
-        spinner.start(`Backing up "${name}"...`);
-        const projResult = await runBackupWithProgress(projService, spinner, {
-          concurrency,
-          delay,
-          incremental,
-          verbose,
-          projectGizmoId: gizmoId
-        });
-
-        totalDownloaded += projResult.downloaded;
-        totalSkipped += projResult.skipped;
-        totalFailed += projResult.failed;
-        totalConversations += projResult.totalConversations;
-
-        console.log();
-        console.log(
-          `  Downloaded: ${chalk.green(projResult.downloaded)}, Skipped: ${chalk.yellow(projResult.skipped)}, Failed: ${chalk.red(projResult.failed)}`
-        );
-      }
-
-      if (shouldDownloadFiles) {
-        await runFileDownloads(client, output, { concurrency, delay, verbose });
-      }
-
-      const filesDir = shouldDownloadFiles
-        ? path.join(output, 'files')
-        : undefined;
-      const md = await convertDirectory(output, filesDir);
-
-      console.log();
-      console.log(chalk.green('\nBackup completed!'));
-      console.log(`  Total conversations: ${totalConversations}`);
-      console.log(`  Downloaded: ${chalk.green(totalDownloaded)}`);
-      if (totalSkipped > 0) {
-        console.log(`  Skipped (unchanged): ${chalk.yellow(totalSkipped)}`);
-      }
-      if (totalFailed > 0) {
-        console.log(`  Failed: ${chalk.red(totalFailed)}`);
-      }
-      console.log(`  Converted ${md.converted} conversations to markdown`);
-      if (md.errors > 0) {
-        console.log(`  Markdown errors: ${chalk.red(md.errors)}`);
-      }
-      console.log(`\nOutput directory: ${chalk.cyan(output)}`);
-    }
-  } catch (error) {
-    spinner.fail('Backup failed');
-
-    if (error instanceof Error) {
-      if (error.name === 'AuthenticationError') {
-        console.error(chalk.red(`\nAuthentication failed: ${error.message}`));
-        console.error(chalk.yellow('\nTo get a new access token:'));
-        console.error('  1. Open chatgpt.com in your browser and log in');
-        console.error('  2. Open DevTools (F12) → Network tab');
-        console.error('  3. Refresh the page or send a message');
-        console.error('  4. Find any request to /backend-api/*');
-        console.error(
-          '  5. Look in Request Headers for "Authorization: Bearer <token>"'
-        );
-        console.error('  6. Copy the token (starts with "eyJhbG...")');
-      } else {
-        console.error(chalk.red(`\nError: ${error.message}`));
-      }
-    }
-
-    process.exit(1);
+function exitCodeFor(reason?: StopReason): number {
+  switch (reason) {
+    case 'throttled':
+      return EXIT.throttled;
+    case 'auth':
+      return EXIT.needsLogin;
+    case 'interrupted':
+      return EXIT.interrupted;
+    case 'too-many-failures':
+      return EXIT.error;
+    default:
+      return EXIT.ok;
   }
 }
 
-function printResult(result: BackupResult, output: string): void {
+function describePlan(plan: BackupPlan): string {
+  const main = plan.sources.find((s) => s.label === 'Conversations');
+  const projects = plan.sources.filter((s) => s !== main);
+  const parts = [
+    `${formatCount(plan.unique)} conversations listed${projects.length > 0 ? ` (incl. ${plural(projects.length, 'project')})` : ''}`,
+    `${formatCount(plan.upToDate)} up to date`,
+  ];
+  if (plan.copied > 0) parts.push(`${formatCount(plan.copied)} copied between folders`);
+  if (plan.skippedFailed > 0) parts.push(`${formatCount(plan.skippedFailed)} skipped after repeated failures`);
+  if (plan.skippedSince > 0) parts.push(`${formatCount(plan.skippedSince)} older than --since`);
+  parts.push(plan.toDownload > 0 ? chalk.bold(`${formatCount(plan.toDownload)} to download`) : 'nothing new to download');
+  return parts.join(' · ');
+}
+
+function printSettings(runtime: Runtime, output: string, options: BackupCommandOptions): void {
+  const { paceSeconds, burst } = runtime.pacing;
+  const perHour = Math.round(3600 / paceSeconds);
+  console.log(chalk.dim(`  Output:  ${output}`));
+  console.log(
+    chalk.dim(
+      `  Mode:    ${options.full ? 'full (re-download everything)' : 'incremental (new and changed chats, then older gaps)'}` +
+        `${options.archived ? ' · archived chats included' : ''}${options.project ? ` · project "${options.project}" only` : ''}`
+    )
+  );
+  console.log(
+    chalk.dim(
+      `  Pace:    1 conversation every ${paceSeconds}s (≈ ${perHour}/hour) after a burst of up to ${burst}` +
+        `${options.maxDownloads ? ` · stop after ${options.maxDownloads}` : ''}`
+    )
+  );
+  if (paceSeconds < 60) {
+    console.log(chalk.yellow('  Note: faster than ChatGPT refills (~1/minute), so this may slow down your own ChatGPT use.'));
+  }
   console.log();
-  console.log(chalk.green('\nBackup completed!'));
-  console.log(`  Total conversations: ${result.totalConversations}`);
-  console.log(`  Downloaded: ${chalk.green(result.downloaded)}`);
-  if (result.skipped > 0) {
-    console.log(`  Skipped (unchanged): ${chalk.yellow(result.skipped)}`);
+}
+
+function printSummary(result: BackupResult, runtime: Runtime, output: string): void {
+  const finished = !result.stopReason;
+  const heading = finished ? chalk.green('\n✔ Backup finished') : chalk.yellow('\n⏸ Backup paused');
+  console.log(heading);
+  console.log(`  Downloaded   ${formatCount(result.downloaded)}`);
+  console.log(`  Up to date   ${formatCount(result.upToDate)}`);
+  if (result.copied > 0) console.log(`  Copied       ${formatCount(result.copied)} (already downloaded in another folder)`);
+  if (result.failed > 0) console.log(`  Failed       ${chalk.red(formatCount(result.failed))} (details in backup.log; retried next run)`);
+  if (result.skippedFailed > 0) {
+    console.log(`  Parked       ${formatCount(result.skippedFailed)} that failed in several runs (use --retry-failed)`);
   }
-  if (result.failed > 0) {
-    console.log(`  Failed: ${chalk.red(result.failed)}`);
-    console.log(chalk.dim(`  See ${output}/backup.log for details`));
+  if (result.remaining > 0) {
+    const eta = formatDuration(runtime.scheduler.estimateMs(result.remaining));
+    console.log(`  Still to do  ${chalk.bold(formatCount(result.remaining))} · ≈ ${eta} at this pace; run backup again to continue`);
   }
-  console.log(`\nOutput directory: ${chalk.cyan(output)}`);
+  if (result.stopReason) {
+    console.log(`  Stopped      ${STOP_MESSAGES[result.stopReason]}${result.stopDetail && result.stopReason !== 'interrupted' ? chalk.dim(` (${result.stopDetail})`) : ''}`);
+  }
+  if (result.workspaceIds.length > 1) {
+    console.log(chalk.yellow(`  Note: conversations came from ${result.workspaceIds.length} workspaces: ${result.workspaceIds.join(', ')}`));
+  }
+  console.log(`  Output       ${chalk.cyan(output)}`);
+  if (result.stopReason === 'auth') console.log(`\n${loginHint()}`);
+}
+
+function summaryLine(result: BackupResult): string {
+  return (
+    `Backup ${result.stopReason ? 'paused' : 'finished'}: ${result.downloaded} downloaded, ${result.upToDate} up to date, ` +
+    `${result.copied} copied, ${result.failed} failed, ${result.remaining} remaining` +
+    (result.stopReason ? ` (stopped: ${STOP_MESSAGES[result.stopReason]})` : '')
+  );
 }
 
 async function loadFailedFiles(output: string): Promise<Set<string>> {
   try {
-    const raw = await fs.readFile(path.join(output, 'metadata.json'), 'utf-8');
-    const metadata = JSON.parse(raw);
-    if (Array.isArray(metadata.failedFiles)) {
-      return new Set(metadata.failedFiles as string[]);
-    }
+    const metadata = JSON.parse(await fs.readFile(path.join(output, 'metadata.json'), 'utf-8')) as { failedFiles?: unknown };
+    if (Array.isArray(metadata.failedFiles)) return new Set(metadata.failedFiles as string[]);
   } catch {
     // No metadata yet
   }
   return new Set();
 }
 
-async function saveFailedFiles(
-  output: string,
-  failedFileIds: string[]
-): Promise<void> {
-  const metadataPath = path.join(output, 'metadata.json');
-  let metadata: Record<string, unknown> = {};
-  try {
-    const raw = await fs.readFile(metadataPath, 'utf-8');
-    metadata = JSON.parse(raw);
-  } catch {
-    // No metadata yet
-  }
-  metadata.failedFiles = failedFileIds;
-  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8');
-}
-
 async function runFileDownloads(
   client: ChatGPTClient,
   output: string,
-  options: { concurrency: number; delay: number; verbose: boolean }
+  reporter: Reporter,
+  options: { verbose: boolean; signal: AbortSignal }
 ): Promise<void> {
-  console.log();
-  const spinner = ora('Scanning conversations for file references...').start();
+  reporter.spin('Scanning conversations for file references…');
   const refs = await scanAllConversations(output);
   const skipFileIds = await loadFailedFiles(output);
-  const skippedKnown = skipFileIds.size > 0
-    ? refs.filter(r => skipFileIds.has(r.fileId)).length
-    : 0;
-  const activeCount = refs.length - skippedKnown;
-  spinner.succeed(
-    `Found ${refs.length} file references` +
-      (skippedKnown > 0
-        ? ` (${skippedKnown} previously failed, skipped)`
-        : '') +
-      '\n'
-  );
+  const known = refs.filter((r) => skipFileIds.has(r.fileId)).length;
+  reporter.spinDone(`Found ${plural(refs.length, 'file reference')}${known > 0 ? ` (${known} previously failed, skipped)` : ''}`);
+  if (refs.length - known === 0) return;
 
-  if (activeCount === 0) return;
+  const errors = new Map<string, number>();
+  let failedIds: string[] = [];
+  try {
+    const result = await downloadFiles(client, refs, output, {
+      verbose: options.verbose,
+      skipFileIds,
+      signal: options.signal,
+      onProgress: (completed, total) => reporter.spin(`Files: ${formatCount(completed)}/${formatCount(total)}`),
+      onError: (_fileId, error) => errors.set(error.message, (errors.get(error.message) ?? 0) + 1),
+    });
+    failedIds = result.failedFileIds;
+    reporter.spinDone(`Files: ${result.downloaded} downloaded, ${result.skipped} already present, ${result.failed} failed`);
+  } finally {
+    await updateMetadata(output, { failedFiles: [...skipFileIds, ...failedIds] });
+  }
+  for (const [message, count] of errors) reporter.warn(`${plural(count, 'file')}: ${message}`);
+}
 
-  const state = { bar: null as ReturnType<typeof createProgressBar> | null };
-  const errors: Array<{ fileId: string; message: string }> = [];
-
-  const result = await downloadFiles(client, refs, output, {
-    concurrency: options.concurrency,
-    delay: options.delay,
-    verbose: options.verbose,
-    skipFileIds,
-    onProgress: (completed, total) => {
-      if (!state.bar) {
-        state.bar = createProgressBar(total, 'Files      ');
-      }
-      state.bar.update(completed);
-    },
-    onError: (fileId, error) => {
-      errors.push({ fileId, message: error.message });
+export async function backupCommand(options: BackupCommandOptions): Promise<number> {
+  const reporter = createReporter();
+  const controller = new AbortController();
+  let interrupts = 0;
+  let firstInterruptAt = 0;
+  const onSigint = () => {
+    const now = Date.now();
+    if (interrupts === 0) {
+      interrupts += 1;
+      firstInterruptAt = now;
+      reporter.warn('Stopping after the current step… (Ctrl+C again to quit immediately)');
+      controller.abort();
+      return;
     }
-  });
+    // `npm run` forwards the terminal's Ctrl+C, so a single press can arrive twice in quick succession.
+    if (now - firstInterruptAt < 1500) return;
+    reporter.finish();
+    process.exit(EXIT.interrupted);
+  };
+  process.on('SIGINT', onSigint);
 
-  state.bar?.stop();
-  console.log();
-  console.log(
-    `  Downloaded: ${chalk.green(result.downloaded)}, Skipped: ${chalk.yellow(result.skipped)}, Failed: ${chalk.red(result.failed)}`
-  );
+  let lock: Lock | undefined;
+  const stopKeepingAwake = options.keepAwake ? keepAwake() : () => {};
 
-  // Merge new failures with previously known ones
-  const allFailed = [...skipFileIds, ...result.failedFileIds];
-  await saveFailedFiles(output, allFailed);
+  try {
+    const settings = await loadSettings();
+    const output = resolveOutputDir(settings, options.output);
+    lock = await acquireLock(settings.stateDir);
 
-  if (errors.length > 0) {
-    // Group errors by message
-    const grouped = new Map<string, string[]>();
-    for (const e of errors) {
-      const list = grouped.get(e.message) ?? [];
-      list.push(e.fileId);
-      grouped.set(e.message, list);
+    const storage = new StorageService(output);
+    await storage.initialize();
+    const log = async (message: string) => {
+      await storage.appendLog(message);
+      if (options.verbose) reporter.info(chalk.dim(message));
+    };
+
+    reporter.spin('Checking your ChatGPT sign-in…');
+    const runtime = await createRuntime({
+      settings,
+      tokenFlag: options.token,
+      pace: options.pace,
+      burst: options.burst,
+      signal: controller.signal,
+      log,
+      ui: reporter,
+    });
+    const { email, expiresAt } = describeCredentials(runtime.credentials());
+    reporter.spinDone(
+      `Signed in${email ? ` as ${email}` : ''}${runtime.workspaceId ? ` · workspace ${runtime.workspaceId}` : ''}` +
+        (expiresAt ? chalk.dim(` · token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)})`) : '')
+    );
+    if (runtime.tokenSource === 'environment') {
+      reporter.info(chalk.dim('  Using CHATGPT_TOKEN from your shell environment (it takes priority over .env).'));
     }
-    for (const [message, fileIds] of grouped) {
-      console.log(chalk.red(`    ${fileIds.length} files: ${message}`));
-      if (options.verbose) {
-        for (const id of fileIds) {
-          console.log(chalk.dim(`      ${id}`));
+    printSettings(runtime, output, options);
+
+    runtime.scheduler.onWait = (kind, info) => reporter.waiting(kind, info);
+    const sync = await SyncStateStore.load(output);
+    const capped = (queued: number) => Math.min(queued, options.maxDownloads ?? Number.POSITIVE_INFINITY);
+    let downloadsShown = false;
+    const service = new BackupService(runtime.client, storage, sync, {
+      onListing: (label, fetched, total) => reporter.listing(label, fetched, total),
+      onQueued: (queued) => {
+        // Downloads start while the list is still being read; the total grows as pages arrive.
+        if (downloadsShown) {
+          reporter.setTotal(capped(queued));
+        } else if (queued > 0) {
+          downloadsShown = true;
+          reporter.startDownloads(capped(queued), (remaining) => runtime.scheduler.estimateMs(remaining));
         }
+      },
+      onListingDone: (plan) => reporter.listingDone(describePlan(plan)),
+      onWarning: (message) => reporter.warn(message),
+      onDownloaded: (entry, done) => reporter.downloadDone(entry.title, done),
+      onFailed: (entry, error, done) => reporter.downloadFailed(entry.title, error.message, done),
+    });
+
+    const { paceSeconds, burst } = runtime.pacing;
+    await storage.appendLog(
+      `Starting backup (${options.full ? 'full' : 'incremental'}; pace ${paceSeconds}s, burst ${burst}` +
+        `${options.maxDownloads ? `, max ${options.maxDownloads}` : ''}${options.project ? `, project ${options.project}` : ''})`
+    );
+    reporter.spin('Listing conversations…');
+    const result = await service.run({
+      full: options.full,
+      refreshList: options.refreshList,
+      includeArchived: options.archived,
+      project: options.project,
+      since: options.since,
+      retryFailed: options.retryFailed,
+      maxDownloads: options.maxDownloads,
+      signal: controller.signal,
+    });
+    reporter.finish();
+
+    if (options.downloadFiles && (!result.stopReason || result.stopReason === 'max-downloads')) {
+      try {
+        await runFileDownloads(runtime.client, output, reporter, { verbose: options.verbose, signal: controller.signal });
+      } catch (error) {
+        reporter.finish();
+        reporter.warn(`File downloads stopped: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
+    if (options.downloadFiles) await convertDirectory(output, path.join(output, 'files'));
+
+    await updateMetadata(output, {
+      timestamp: new Date().toISOString(),
+      mode: options.full ? 'full' : 'incremental',
+      pace: paceSeconds,
+      burst,
+      totalConversations: result.unique,
+      sources: result.sources,
+      upToDate: result.upToDate,
+      copied: result.copied,
+      successfulDownloads: result.downloaded,
+      failedDownloads: result.failed,
+      remaining: result.remaining,
+      skippedFailed: result.skippedFailed,
+      skippedSince: result.skippedSince,
+      stopReason: result.stopReason ?? null,
+      workspaceIds: result.workspaceIds,
+      errors: result.errors.slice(0, 200),
+    });
+    await storage.appendLog(summaryLine(result));
+    printSummary(result, runtime, output);
+    if (result.stopReason === 'auth') notifyIfUnattended('Backup paused: sign in again with `chatgpt-exporter login`.');
+    return exitCodeFor(result.stopReason);
+  } catch (error) {
+    reporter.finish();
+    return handleCommandError(error, options.verbose);
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+    stopKeepingAwake();
+    await lock?.release();
   }
 }

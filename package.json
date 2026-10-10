@@ -1,7 +1,8 @@
 {
   "name": "chatgpt-exporter",
-  "version": "1.1.0",
-  "description": "CLI tool to export ChatGPT conversations",
+  "version": "2.0.0-fork.2",
+  "private": true,
+  "description": "CLI tool to export ChatGPT conversations (fork: saved login, incremental by default, paced under ChatGPT's limits)",
   "license": "MIT",
   "author": "Rodrigo Fernández",
   "type": "module",
@@ -13,13 +14,17 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup src/index.ts --format esm --dts --clean",
     "start": "node dist/index.js",
-    "prepublishOnly": "npm run build"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test --test-timeout=60000 test/*.test.ts",
+    "login": "node dist/index.js login",
+    "backup": "node dist/index.js backup",
+    "status": "node dist/index.js status"
   },
   "repository": {
     "type": "git",

@@ -1,12 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { ChatGPTClient } from '../api/client.js';
+import type { ChatGPTClient } from '../api/client.js';
 import { ENDPOINTS } from '../api/endpoints.js';
 import {
+  AuthenticationError,
+  ThrottledError,
   type FileReference,
   type ConversationDetail,
 } from '../api/types.js';
-import { sleep } from '../utils/retry.js';
+import { isAbortError } from '../utils/time.js';
 
 export interface FileDownloadStats {
   downloaded: number;
@@ -15,10 +17,9 @@ export interface FileDownloadStats {
 }
 
 export interface FileDownloadOptions {
-  concurrency: number;
-  delay: number;
   verbose: boolean;
   skipFileIds?: Set<string>;
+  signal?: AbortSignal;
   onProgress?: (completed: number, total: number, stats: FileDownloadStats) => void;
   onError?: (fileId: string, error: Error) => void;
 }
@@ -179,7 +180,7 @@ export async function downloadFiles(
   outputDir: string,
   options: FileDownloadOptions,
 ): Promise<FileDownloadResult> {
-  const { concurrency, delay, verbose, skipFileIds, onProgress, onError } = options;
+  const { verbose, skipFileIds, signal, onProgress, onError } = options;
 
   const filesDir = path.join(outputDir, 'files');
 
@@ -194,36 +195,33 @@ export async function downloadFiles(
   let completed = 0;
   const failedFileIds: string[] = [];
 
-  const queue = [...refs];
-  const inProgress = new Set<Promise<void>>();
-
   const reportProgress = () => {
     completed++;
     onProgress?.(completed, refs.length, { downloaded, skipped, failed });
   };
 
-  const processOne = async (ref: FileReference): Promise<void> => {
+  // One at a time: the client's scheduler paces requests and handles throttling.
+  for (const ref of refs) {
+    if (signal?.aborted) break;
     const fileDir = path.join(filesDir, ref.fileId);
 
     // Check if already downloaded (walk into subdirs since filenames can contain paths)
     if (await dirHasFiles(fileDir)) {
       skipped++;
       reportProgress();
-      return;
+      continue;
     }
 
     try {
-      // Step 1: Get download URL (1 retry — if the file is gone, retrying won't help)
-      const meta = await client.fetch<Record<string, unknown>>(ENDPOINTS.FILE_DOWNLOAD(ref.fileId), {
-        retryOptions: { maxRetries: 1 },
-      });
+      // Step 1: Get download URL
+      const meta = await client.getJson('file', ENDPOINTS.FILE_DOWNLOAD(ref.fileId), (data) => data as Record<string, unknown>);
 
       if (!meta.download_url) {
         throw new Error('File not available');
       }
 
-      // Step 2: Download the actual file from signed URL (1 retry)
-      const buffer = await client.fetchRaw(meta.download_url as string, { maxRetries: 1 });
+      // Step 2: Download the actual file from the signed URL
+      const buffer = await client.fetchRaw(meta.download_url as string);
 
       // Only create the directory once we have the file data
       // file_name can contain subdirs (e.g. "dalle-generations/uuid.w"), so mkdir the full parent
@@ -237,30 +235,15 @@ export async function downloadFiles(
         console.log(`  Downloaded file: ${ref.fileId} → ${filename}`);
       }
     } catch (error) {
+      // Throttling, auth and Ctrl+C end the file pass rather than marking every remaining file as failed.
+      if (error instanceof ThrottledError || error instanceof AuthenticationError || isAbortError(error)) {
+        throw error;
+      }
       failed++;
       failedFileIds.push(ref.fileId);
       onError?.(ref.fileId, error as Error);
-    } finally {
-      reportProgress();
     }
-  };
-
-  while (queue.length > 0 || inProgress.size > 0) {
-    while (inProgress.size < concurrency && queue.length > 0) {
-      const ref = queue.shift()!;
-      const promise = processOne(ref).then(() => {
-        inProgress.delete(promise);
-      });
-      inProgress.add(promise);
-
-      if (queue.length > 0 && delay > 0) {
-        await sleep(delay);
-      }
-    }
-
-    if (inProgress.size > 0) {
-      await Promise.race(inProgress);
-    }
+    reportProgress();
   }
 
   return { downloaded, skipped, failed, total: refs.length, failedFileIds };

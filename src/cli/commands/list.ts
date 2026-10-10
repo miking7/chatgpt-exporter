@@ -1,102 +1,62 @@
 import chalk from 'chalk';
-import ora from 'ora';
-import { ChatGPTClient } from '../../api/client.js';
-import { BackupService } from '../../services/backup-service.js';
-import { StorageService } from '../../services/storage-service.js';
+import type { ConversationItem } from '../../api/types.js';
+import { fetchAllConversations, fetchAllProjects, fetchProjectConversations } from '../../api/pagination.js';
+import { plural } from '../../utils/format.js';
+import { createReporter } from '../reporter.js';
+import { createRuntime } from '../runtime.js';
+import { EXIT, handleCommandError } from '../errors.js';
 
 export interface ListOptions {
-  token: string;
-  delay: number;
+  token?: string;
   verbose: boolean;
   json: boolean;
+  archived: boolean;
   project?: string;
 }
 
-export async function listCommand(options: ListOptions): Promise<void> {
-  const { token, delay, verbose, json, project } = options;
-
-  const client = new ChatGPTClient(token, { verbose });
-  const storage = new StorageService('./chatgpt-export');
-  const service = new BackupService(client, storage);
-
-  const spinner = ora('Authenticating...').start();
-
+export async function listCommand(options: ListOptions): Promise<number> {
+  const reporter = createReporter();
   try {
-    await client.initialize();
+    reporter.spin('Checking your ChatGPT sign-in…');
+    const runtime = await createRuntime({ tokenFlag: options.token, ui: reporter });
+    const client = runtime.client;
 
-    let conversations;
-
-    if (project) {
-      spinner.text = 'Resolving project...';
-      const { gizmoId, name } = await service.resolveProjectId(project);
-      spinner.text = `Fetching conversations from project "${name}"...`;
-
-      let lastReported = 0;
-      conversations = await service.listProjectConversations(gizmoId, {
-        delay,
-        onListProgress: (fetched, total) => {
-          if (fetched !== lastReported) {
-            spinner.text = `Fetching conversations from "${name}"... ${fetched}`;
-            lastReported = fetched;
-          }
-        },
-      });
-
-      spinner.succeed(`Found ${conversations.length} conversations in project "${name}"`);
+    let conversations: ConversationItem[];
+    if (options.project) {
+      reporter.spin('Resolving project…');
+      const wanted = options.project.toLowerCase();
+      const projects = await fetchAllProjects(client);
+      const match = projects.find((p) => p.gizmo.id === options.project || p.gizmo.display.name.toLowerCase() === wanted);
+      if (!match) {
+        const available = projects.map((p) => p.gizmo.display.name).join(', ') || '(none)';
+        throw new Error(`Project "${options.project}" not found. Available projects: ${available}`);
+      }
+      reporter.spin(`Listing conversations in "${match.gizmo.display.name}"…`);
+      conversations = await fetchProjectConversations(client, match.gizmo.id);
     } else {
-      spinner.text = 'Fetching conversations...';
-
-      let lastReported = 0;
-      conversations = await service.listConversations({
-        delay,
-        onListProgress: (fetched, total) => {
-          if (fetched !== lastReported) {
-            spinner.text = `Fetching conversations... ${fetched}/${total}`;
-            lastReported = fetched;
-          }
-        },
-      });
-
-      spinner.succeed(`Found ${conversations.length} conversations`);
+      reporter.spin(`Listing ${options.archived ? 'archived ' : ''}conversations…`);
+      conversations = await fetchAllConversations(client, { archived: options.archived });
     }
+    reporter.spinDone(`Found ${plural(conversations.length, 'conversation')}`);
+    reporter.finish();
 
-    if (json) {
+    if (options.json) {
       console.log(JSON.stringify(conversations, null, 2));
-    } else {
-      console.log();
-      for (const conv of conversations) {
-        const title = conv.title ?? chalk.dim('(untitled)');
-        const date = conv.update_time
-          ? new Date(
-              typeof conv.update_time === 'number'
-                ? conv.update_time * 1000
-                : conv.update_time
-            ).toLocaleDateString()
-          : 'unknown date';
-
-        console.log(`${chalk.cyan(conv.id)} ${title} ${chalk.dim(`[${date}]`)}`);
-      }
-      console.log();
-      console.log(chalk.green(`Total: ${conversations.length} conversations`));
+      return EXIT.ok;
     }
+    console.log();
+    for (const conv of conversations) {
+      const title = conv.title ?? chalk.dim('(untitled)');
+      const date = conv.update_time
+        ? new Date(typeof conv.update_time === 'number' ? conv.update_time * 1000 : conv.update_time).toLocaleDateString()
+        : 'unknown date';
+      console.log(`${chalk.cyan(conv.id)} ${title} ${chalk.dim(`[${date}]`)}`);
+    }
+    console.log();
+    console.log(chalk.green(`Total: ${plural(conversations.length, 'conversation')}`));
+    return EXIT.ok;
   } catch (error) {
-    spinner.fail('Failed to list conversations');
-
-    if (error instanceof Error) {
-      if (error.name === 'AuthenticationError') {
-        console.error(chalk.red(`\nAuthentication failed: ${error.message}`));
-        console.error(chalk.yellow('\nTo get a new access token:'));
-        console.error('  1. Open chatgpt.com in your browser and log in');
-        console.error('  2. Open DevTools (F12) → Network tab');
-        console.error('  3. Refresh the page or send a message');
-        console.error('  4. Find any request to /backend-api/*');
-        console.error('  5. Look in Request Headers for "Authorization: Bearer <token>"');
-        console.error('  6. Copy the token (starts with "eyJhbG...")');
-      } else {
-        console.error(chalk.red(`\nError: ${error.message}`));
-      }
-    }
-
-    process.exit(1);
+    reporter.finish();
+    return handleCommandError(error, options.verbose);
   }
 }

@@ -1,32 +1,27 @@
 import chalk from 'chalk';
-import ora from 'ora';
-import { ChatGPTClient } from '../../api/client.js';
-import { BackupService } from '../../services/backup-service.js';
-import { StorageService } from '../../services/storage-service.js';
+import { fetchAllProjects } from '../../api/pagination.js';
+import { plural } from '../../utils/format.js';
+import { createReporter } from '../reporter.js';
+import { createRuntime } from '../runtime.js';
+import { EXIT, handleCommandError } from '../errors.js';
 
 export interface ProjectsCommandOptions {
-  token: string;
+  token?: string;
   verbose: boolean;
   json: boolean;
 }
 
-export async function projectsCommand(options: ProjectsCommandOptions): Promise<void> {
-  const { token, verbose, json } = options;
-
-  const client = new ChatGPTClient(token, { verbose });
-  const storage = new StorageService('./chatgpt-export');
-  const service = new BackupService(client, storage);
-
-  const spinner = ora('Authenticating...').start();
-
+export async function projectsCommand(options: ProjectsCommandOptions): Promise<number> {
+  const reporter = createReporter();
   try {
-    await client.initialize();
-    spinner.text = 'Fetching projects...';
+    reporter.spin('Checking your ChatGPT sign-in…');
+    const runtime = await createRuntime({ tokenFlag: options.token, ui: reporter });
+    reporter.spin('Fetching projects…');
+    const projects = await fetchAllProjects(runtime.client);
+    reporter.spinDone(`Found ${plural(projects.length, 'project')}`);
+    reporter.finish();
 
-    const projects = await service.listProjects();
-    spinner.succeed(`Found ${projects.length} projects`);
-
-    if (json) {
+    if (options.json) {
       const output = projects.map((p) => ({
         id: p.gizmo.id,
         name: p.gizmo.display.name,
@@ -35,41 +30,20 @@ export async function projectsCommand(options: ProjectsCommandOptions): Promise<
         is_archived: p.gizmo.is_archived,
       }));
       console.log(JSON.stringify(output, null, 2));
-    } else {
-      console.log();
-      for (const project of projects) {
-        const gizmo = project.gizmo;
-        const name = gizmo.display.name;
-        const id = gizmo.id;
-        const lastInteracted = gizmo.last_interacted_at
-          ? new Date(gizmo.last_interacted_at).toLocaleDateString()
-          : 'never';
-
-        console.log(
-          `${chalk.cyan(id)} ${chalk.bold(name)} ${chalk.dim(`[last: ${lastInteracted}]`)}`
-        );
-      }
-      console.log();
-      console.log(chalk.green(`Total: ${projects.length} projects`));
+      return EXIT.ok;
     }
+
+    console.log();
+    for (const project of projects) {
+      const gizmo = project.gizmo;
+      const lastInteracted = gizmo.last_interacted_at ? new Date(gizmo.last_interacted_at).toLocaleDateString() : 'never';
+      console.log(`${chalk.cyan(gizmo.id)} ${chalk.bold(gizmo.display.name)} ${chalk.dim(`[last: ${lastInteracted}]`)}`);
+    }
+    console.log();
+    console.log(chalk.green(`Total: ${plural(projects.length, 'project')}`));
+    return EXIT.ok;
   } catch (error) {
-    spinner.fail('Failed to list projects');
-
-    if (error instanceof Error) {
-      if (error.name === 'AuthenticationError') {
-        console.error(chalk.red(`\nAuthentication failed: ${error.message}`));
-        console.error(chalk.yellow('\nTo get a new access token:'));
-        console.error('  1. Open chatgpt.com in your browser and log in');
-        console.error('  2. Open DevTools (F12) → Network tab');
-        console.error('  3. Refresh the page or send a message');
-        console.error('  4. Find any request to /backend-api/*');
-        console.error('  5. Look in Request Headers for "Authorization: Bearer <token>"');
-        console.error('  6. Copy the token (starts with "eyJhbG...")');
-      } else {
-        console.error(chalk.red(`\nError: ${error.message}`));
-      }
-    }
-
-    process.exit(1);
+    reporter.finish();
+    return handleCommandError(error, options.verbose);
   }
 }

@@ -1,121 +1,73 @@
-import { ChatGPTClient } from './client.js';
-import { ENDPOINTS } from './endpoints.js';
-import {
-  ConversationsResponseSchema,
+import type { ChatGPTClient } from './client.js';
+import type {
   ConversationItem,
-  type ConversationsResponse,
-  ProjectsSidebarResponseSchema,
-  ProjectConversationsResponseSchema,
-  type SidebarItem,
-  type ProjectsSidebarResponse,
-  type ProjectConversationsResponse,
+  ConversationsResponse,
+  ProjectConversationsResponse,
+  ProjectsSidebarResponse,
+  SidebarItem,
 } from './types.js';
-import { sleep } from '../utils/retry.js';
 
-export interface PaginationOptions {
-  limit?: number;
-  delay?: number;
-  onProgress?: (fetched: number, total: number) => void;
+export interface ConversationPage {
+  items: ConversationItem[];
+  total: number;
+  /** Items listed so far, including this page. */
+  fetched: number;
 }
 
-export async function* fetchAllConversations(
+/** Pages of conversations, most recently updated first. Pacing comes from the client's scheduler. */
+export async function* conversationPages(
   client: ChatGPTClient,
-  options: PaginationOptions = {}
-): AsyncGenerator<ConversationItem, void, unknown> {
-  const { limit = 100, delay = 500, onProgress } = options;
+  options: { archived?: boolean; pageSize?: number; signal?: AbortSignal } = {}
+): AsyncGenerator<ConversationPage, void, unknown> {
+  const pageSize = options.pageSize ?? 100;
   let offset = 0;
-  let total = Infinity;
-  let fetched = 0;
+  let total = Number.POSITIVE_INFINITY;
 
   while (offset < total) {
-    const response = await client.fetch<ConversationsResponse>(
-      `${ENDPOINTS.CONVERSATIONS}?offset=${offset}&limit=${limit}&order=updated`,
-      {
-        parseResponse: (data) => ConversationsResponseSchema.parse(data),
-      }
-    );
-
+    const response: ConversationsResponse = await client.listConversations(offset, pageSize, options.archived, options.signal);
     total = response.total;
-
-    for (const item of response.items) {
-      yield item;
-      fetched++;
-    }
-
-    onProgress?.(fetched, total);
-
-    offset += limit;
-
-    if (offset < total && delay > 0) {
-      await sleep(delay);
-    }
+    // Advance by what actually came back, in case the server caps the page size.
+    offset += response.items.length;
+    yield { items: response.items, total: response.total, fetched: offset };
+    if (response.items.length === 0) break;
   }
 }
 
-export async function countConversations(client: ChatGPTClient): Promise<number> {
-  const response = await client.fetch<ConversationsResponse>(
-    `${ENDPOINTS.CONVERSATIONS}?offset=0&limit=1`,
-    {
-      parseResponse: (data) => ConversationsResponseSchema.parse(data),
-    }
-  );
-  return response.total;
-}
-
-export async function fetchAllProjects(
+export async function fetchAllConversations(
   client: ChatGPTClient,
-  options: { delay?: number } = {}
-): Promise<SidebarItem[]> {
-  const { delay = 500 } = options;
-  const allItems: SidebarItem[] = [];
-  let cursor: string | null | undefined = null;
-
-  do {
-    const url = cursor
-      ? `${ENDPOINTS.PROJECTS_SIDEBAR}?cursor=${encodeURIComponent(cursor)}`
-      : ENDPOINTS.PROJECTS_SIDEBAR;
-
-    const response = await client.fetch<ProjectsSidebarResponse>(url, {
-      parseResponse: (data) => ProjectsSidebarResponseSchema.parse(data),
-    });
-
-    allItems.push(...response.items);
-    cursor = response.cursor;
-
-    if (cursor && delay > 0) {
-      await sleep(delay);
-    }
-  } while (cursor);
-
-  return allItems;
+  options: { archived?: boolean; signal?: AbortSignal } = {}
+): Promise<ConversationItem[]> {
+  const all: ConversationItem[] = [];
+  for await (const page of conversationPages(client, options)) all.push(...page.items);
+  return all;
 }
 
-export async function* fetchProjectConversations(
+export async function fetchAllProjects(client: ChatGPTClient, options: { signal?: AbortSignal } = {}): Promise<SidebarItem[]> {
+  const all: SidebarItem[] = [];
+  let cursor: string | null = null;
+  do {
+    const response: ProjectsSidebarResponse = await client.listProjectsPage(cursor, options.signal);
+    all.push(...response.items);
+    const next: string | null = response.cursor ?? null;
+    if (next === cursor) break;
+    cursor = next;
+  } while (cursor);
+  return all;
+}
+
+export async function fetchProjectConversations(
   client: ChatGPTClient,
   gizmoId: string,
-  options: PaginationOptions = {}
-): AsyncGenerator<ConversationItem, void, unknown> {
-  const { delay = 500, onProgress } = options;
-  let cursor: string | null | undefined = '0';
-  let fetched = 0;
-
-  while (cursor !== null && cursor !== undefined) {
-    const url = `${ENDPOINTS.PROJECT_CONVERSATIONS(gizmoId)}?cursor=${encodeURIComponent(cursor)}`;
-
-    const response = await client.fetch<ProjectConversationsResponse>(url, {
-      parseResponse: (data) => ProjectConversationsResponseSchema.parse(data),
-    });
-
-    for (const item of response.items) {
-      yield item;
-      fetched++;
-    }
-
-    cursor = response.cursor;
-    onProgress?.(fetched, fetched);
-
-    if (cursor && delay > 0) {
-      await sleep(delay);
-    }
+  options: { signal?: AbortSignal } = {}
+): Promise<ConversationItem[]> {
+  const all: ConversationItem[] = [];
+  let cursor: string | null = '0';
+  while (cursor !== null) {
+    const response: ProjectConversationsResponse = await client.listProjectConversationsPage(gizmoId, cursor, options.signal);
+    all.push(...response.items);
+    const next: string | null = response.cursor ?? null;
+    if (response.items.length === 0 || next === cursor) break;
+    cursor = next;
   }
+  return all;
 }

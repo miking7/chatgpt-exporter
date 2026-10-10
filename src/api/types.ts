@@ -133,13 +133,14 @@ export class AuthenticationError extends Error {
   }
 }
 
-export class RateLimitError extends Error {
-  retryAfter?: number;
+/** ChatGPT kept throttling after repeated cooldowns; the run should stop and resume later. */
+export class ThrottledError extends Error {
+  resumeAt?: number;
 
-  constructor(message: string, retryAfter?: number) {
+  constructor(message: string, resumeAt?: number) {
     super(message);
-    this.name = 'RateLimitError';
-    this.retryAfter = retryAfter;
+    this.name = 'ThrottledError';
+    this.resumeAt = resumeAt;
   }
 }
 
@@ -150,5 +151,23 @@ export class NetworkError extends Error {
     super(message);
     this.name = 'NetworkError';
     this.statusCode = statusCode;
+  }
+}
+
+export class HttpError extends Error {
+  statusCode: number;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = 'HttpError';
+    this.statusCode = statusCode;
+  }
+}
+
+/** The conversation or file no longer exists (deleted since it was listed). */
+export class NotFoundError extends HttpError {
+  constructor(message: string) {
+    super(message, 404);
+    this.name = 'NotFoundError';
   }
 }
