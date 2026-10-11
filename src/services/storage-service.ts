@@ -2,11 +2,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { ConversationItem, ConversationDetail } from '../api/types.js';
 import { abortError } from '../utils/time.js';
+import { idSuffix, markdownFileName, suffixOfMarkdownName } from './conversation-names.js';
 import { buildFileMap } from './file-service.js';
 import { conversationTimes, convertConversation, type ConversationTimes } from './markdown-service.js';
 
 /** Bumped whenever the Markdown changes (content or location), so the next backup regenerates it from the JSON. */
-export const MARKDOWN_FORMAT = 2;
+export const MARKDOWN_FORMAT = 3;
 
 export function projectFolderName(projectName: string): string {
   return projectName.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -36,11 +37,16 @@ export interface StorageOptions {
 
 export class StorageService {
   readonly outputDir: string;
+  /** The JSON: what the sync reads and writes, one `<id>.json` per conversation. */
   readonly conversationsDir: string;
+  /** The readable Markdown, named by date and title (markdown/, or markdown/projects/<folder>/). */
+  readonly markdownDir: string;
   /** "Conversations" for the main folder, otherwise the project name. */
   readonly label: string;
   readonly timeZone: string;
   private fileLinks?: Map<string, string>;
+  /** Markdown file names by id suffix, read once. */
+  private markdownFiles?: Promise<Map<string, Set<string>>>;
 
   constructor(outputDir: string, options: StorageOptions) {
     this.outputDir = outputDir;
@@ -50,6 +56,7 @@ export class StorageService {
     this.conversationsDir = folder === undefined
       ? path.join(outputDir, 'conversations')
       : path.join(outputDir, 'projects', folder, 'conversations');
+    this.markdownDir = folder === undefined ? path.join(outputDir, 'markdown') : path.join(outputDir, 'markdown', 'projects', folder);
   }
 
   /** This archive's folder for a project. */
@@ -59,15 +66,13 @@ export class StorageService {
 
   async initialize(): Promise<void> {
     await fs.mkdir(this.conversationsDir, { recursive: true });
+    await fs.mkdir(this.markdownDir, { recursive: true });
     await removeStaleTempFiles(this.conversationsDir);
+    await removeStaleTempFiles(this.markdownDir);
   }
 
   jsonPath(id: string): string {
     return path.join(this.conversationsDir, `${id}.json`);
-  }
-
-  markdownPath(id: string): string {
-    return path.join(this.conversationsDir, `${id}.md`);
   }
 
   /** Lets Markdown written during the run link to files already downloaded into files/. */
@@ -76,7 +81,7 @@ export class StorageService {
     if (globalMap.size === 0) return;
     this.fileLinks = new Map();
     for (const [fileId, filePath] of globalMap) {
-      this.fileLinks.set(fileId, path.relative(this.conversationsDir, path.join(this.outputDir, filePath)));
+      this.fileLinks.set(fileId, path.relative(this.markdownDir, path.join(this.outputDir, filePath)));
     }
   }
 
@@ -102,12 +107,44 @@ export class StorageService {
 
   /** Rewrites the Markdown only when it changed, then gives it the chat's dates; returns whether it was written. */
   private async saveMarkdown(id: string, data: ConversationDetail, times: ConversationTimes): Promise<boolean> {
-    const file = this.markdownPath(id);
+    const name = markdownFileName(id, data.title, times.created, this.timeZone);
+    const file = path.join(this.markdownDir, name);
     const markdown = convertConversation(data, { id, timeZone: this.timeZone, fileMap: this.fileLinks });
     const changed = (await readTextIfExists(file)) !== markdown;
     if (changed) await writeAtomic(file, markdown);
     await stampTimes(file, times);
+    await this.removeOtherMarkdown(id, name);
     return changed;
+  }
+
+  private markdownIndex(): Promise<Map<string, Set<string>>> {
+    this.markdownFiles ??= (async () => {
+      const index = new Map<string, Set<string>>();
+      for (const name of await fs.readdir(this.markdownDir).catch(() => [] as string[])) {
+        const suffix = suffixOfMarkdownName(name);
+        if (suffix === undefined) continue;
+        const names = index.get(suffix) ?? new Set<string>();
+        index.set(suffix, names.add(name));
+      }
+      return index;
+    })();
+    return this.markdownFiles;
+  }
+
+  /** This conversation's Markdown under an earlier title, and the copy beside the JSON written before version 2.0.0-fork.7. */
+  private async removeOtherMarkdown(id: string, keep: string): Promise<void> {
+    const suffix = idSuffix(id);
+    const index = await this.markdownIndex();
+    const names = index.get(suffix) ?? new Set<string>();
+    for (const name of names) {
+      if (name === keep) continue;
+      // A conversation whose id happens to end the same way would be listed too: remove only this one's.
+      if ((await readFrontMatterId(path.join(this.markdownDir, name))) !== id) continue;
+      await fs.rm(path.join(this.markdownDir, name), { force: true });
+      names.delete(name);
+    }
+    index.set(suffix, names.add(keep));
+    await fs.rm(path.join(this.conversationsDir, `${id}.md`), { force: true });
   }
 
   /** Copies a conversation saved in another folder; returns the version copied. */
@@ -180,13 +217,7 @@ export class StorageService {
   private async readVersionFromHead(id: string, buffer: Buffer): Promise<SavedVersion | null> {
     let head: string;
     try {
-      const handle = await fs.open(this.jsonPath(id), 'r');
-      try {
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-        head = buffer.toString('utf8', 0, bytesRead);
-      } finally {
-        await handle.close();
-      }
+      head = await readHead(this.jsonPath(id), buffer);
     } catch {
       return null;
     }
@@ -228,6 +259,7 @@ export async function convertArchive(
   if (total > 0) options.onProgress?.(0, total);
   for (const { storage, ids } of work) {
     if (ids.length === 0) continue;
+    await storage.initialize();
     await storage.loadFileLinks();
     for (const id of ids) {
       if (options.signal?.aborted) throw abortError(options.signal);
@@ -262,6 +294,25 @@ export async function stampTimes(filePath: string, times: ConversationTimes): Pr
     await fs.utimes(filePath, stat.atime, modified);
   } catch {
     // The dates are a convenience: never fail a save over them.
+  }
+}
+
+async function readHead(filePath: string, buffer: Buffer): Promise<string> {
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.toString('utf8', 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The id in the front matter of a Markdown file this tool wrote; null for any other file. */
+async function readFrontMatterId(filePath: string): Promise<string | null> {
+  try {
+    return /^---\r?\nid: (\S+)/.exec(await readHead(filePath, Buffer.alloc(256)))?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 

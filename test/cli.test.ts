@@ -56,7 +56,7 @@ test('CLI: a fresh user with nothing configured gets ~/Documents/chatgpt-export,
     const backup = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
     assert.equal(backup.code, 0, backup.stderr + backup.stdout);
     const archive = path.join(home, 'Documents', 'chatgpt-export');
-    assert.equal((await fs.readdir(path.join(archive, 'conversations'))).filter((f) => f.endsWith('.md')).length, 2);
+    assert.equal((await fs.readdir(path.join(archive, 'markdown'))).filter((f) => f.endsWith('.md')).length, 2);
     const config = await fs.readFile(path.join(home, '.config', 'chatgpt-exporter', 'config.env'), 'utf-8');
     assert.match(config, new RegExp(`CHATGPT_EXPORT_DIR=${archive}`), 'default saved so later runs stay put');
     assert.match(config, /^CHATGPT_TOKEN=/m, 'token kept');
@@ -84,7 +84,7 @@ test('CLI: backup reads token and output folder from config.env, then status sum
     assert.match(backup.stdout, /Backup finished/);
     const files = await fs.readdir(path.join(out, 'conversations'));
     assert.equal(files.filter((f) => f.endsWith('.json') && f !== 'index.json').length, 4);
-    assert.equal(files.filter((f) => f.endsWith('.md')).length, 4);
+    assert.equal((await fs.readdir(path.join(out, 'markdown'))).filter((f) => f.endsWith('.md')).length, 4);
 
     const metadata = JSON.parse(await fs.readFile(path.join(out, 'metadata.json'), 'utf-8'));
     assert.equal(metadata.mode, 'incremental');
@@ -108,16 +108,19 @@ test('CLI: backup reads token and output folder from config.env, then status sum
     assert.match(status.stdout, /Time zone +\S+\s*$/m);
     assert.equal(mock.count((r) => r.path.startsWith('/backend-api/conversation/')), 4, 'status made no requests');
 
-    // As if an earlier version made the archive: old Markdown, no format recorded, a temp file from a killed run.
-    const [firstMd] = (await fs.readdir(path.join(out, 'conversations'))).filter((f) => f.endsWith('.md'));
-    await fs.writeFile(path.join(out, 'conversations', firstMd), '# Old format\n');
+    // As if an earlier version made the archive: Markdown beside the JSON, no format recorded, a temp file from a killed run.
+    const markdownDir = path.join(out, 'markdown');
+    const [firstMd] = (await fs.readdir(markdownDir)).filter((f) => f.endsWith('.md'));
+    const firstId = /^id: (\S+)$/m.exec(await fs.readFile(path.join(markdownDir, firstMd), 'utf-8'))![1];
+    await fs.rename(path.join(markdownDir, firstMd), path.join(out, 'conversations', `${firstId}.md`));
     const { markdownFormat: _, ...older } = JSON.parse(await fs.readFile(path.join(out, 'metadata.json'), 'utf-8'));
     await fs.writeFile(path.join(out, 'metadata.json'), JSON.stringify(older));
     await fs.writeFile(path.join(out, '.sync-state.json.99999999.tmp'), '');
     const upgraded = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
     assert.equal(upgraded.code, 0, upgraded.stderr);
     assert.match(upgraded.stderr, /Markdown files updated: 1 rewritten, 3 already current/);
-    assert.match(await fs.readFile(path.join(out, 'conversations', firstMd), 'utf-8'), /^id: /m);
+    await fs.access(path.join(markdownDir, firstMd));
+    await assert.rejects(fs.access(path.join(out, 'conversations', `${firstId}.md`)), 'the copy beside the JSON is gone');
     await assert.rejects(fs.access(path.join(out, '.sync-state.json.99999999.tmp')), 'temp file from a killed run removed');
     assert.equal(mock.count((r) => r.path.startsWith('/backend-api/conversation/')), 4, 'nothing re-downloaded');
   } finally {

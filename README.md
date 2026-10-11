@@ -106,16 +106,20 @@ The archive itself:
 
 ```
 chatgpt-export/
+  markdown/
+    2026-10-11 Scheduled sync on macOS (3f1e2b4c5d6e).md   # readable Markdown of the current branch
+    projects/<Project_Name>/                               # the same, per project
   conversations/
     index.json            # every conversation (incl. archived), newest first
     <id>.json             # the full conversation from the API (all branches)
-    <id>.md               # readable Markdown of the current branch
-  projects/<Project_Name>/conversations/   # the same layout per project
+  projects/<Project_Name>/conversations/   # the same JSON layout per project
   files/<fileId>/<name>   # with --download-files
   metadata.json           # summary of the last run
   backup.log              # what happened, run by run
   .sync-state.json        # when the list was last read in full; chats that keep failing
 ```
+
+The Markdown files are named by the date the chat started, its title and the end of its id, so they sort by date and are easy to recognise in Finder and Spotlight results. Characters that some systems don't allow in file names are left out of the name (the title inside the file is complete). When a chat is renamed in ChatGPT, its file is renamed too. The JSON keeps the plain `<id>.json` name, which is what keeps track of what's been downloaded.
 
 Each conversation's files carry the chat's own dates: in Finder, **Date Created** is when the chat started and **Date Modified** is when it last changed (Linux and Windows get Date Modified only). **Date Added** shows when the backup last wrote the file. Each Markdown file starts with a small YAML header (`id`, a `url` back to the chat, `title`, `created`, `updated`) that Obsidian and other editors can sort and filter on.
 
@@ -157,7 +161,7 @@ Other commands:
 
 ## Already have an archive from the original tool?
 
-This fork reads the same layout. Run `backup` from the folder that contains your `chatgpt-export/` and the first-run question suggests it, or set `CHATGPT_EXPORT_DIR` to it. Conversations you already have are left alone; only new and changed ones are fetched.
+This fork reads the same layout. Run `backup` from the folder that contains your `chatgpt-export/` and the first-run question suggests it, or set `CHATGPT_EXPORT_DIR` to it. Conversations you already have are left alone; only new and changed ones are fetched. The first run writes the Markdown into `markdown/` from the JSON you already have (nothing is downloaded again) and removes the old `.md` files beside the JSON.
 
 ## Troubleshooting
 
@@ -184,7 +188,7 @@ This tool runs entirely on your machine. It only talks to OpenAI's servers (`cha
 | Settings and archive | `--token` flag; archive relative to the current folder | Per-user settings folder; absolute archive folder chosen once |
 | Ctrl+C | Ignored while a spinner is showing | Stops gracefully at any point |
 | Archived chats | Not backed up | Included |
-| Markdown | Only written when the whole run finishes | Written as each conversation is saved, with a YAML header and dates in your time zone |
+| Markdown | `<id>.md` beside the JSON, only written when the whole run finishes | `markdown/2026-10-11 Title (id).md`, written as each conversation is saved, with a YAML header and dates in your time zone |
 | File dates | The download time | The chat's own dates (Finder's Date Created and Date Modified) |
 | Project chats | Downloaded twice | Downloaded once, then copied |
 | Extras | | `status`, `--max-downloads`, `--since`, `logout`, `convert`, a lock against overlapping runs, deleted chats aren't retried forever |

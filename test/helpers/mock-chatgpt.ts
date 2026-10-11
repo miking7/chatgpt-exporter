@@ -14,6 +14,8 @@ export interface MockConversation {
   malformed?: boolean;
   /** The conversation itself has another title than the list shows. */
   detailTitle?: string;
+  /** The question includes an uploaded image with this file id. */
+  imageFileId?: string;
 }
 
 export interface MockOptions {
@@ -61,7 +63,17 @@ function detailFor(c: MockConversation) {
         id: 'u1',
         parent: 'root',
         children: ['a1'],
-        message: { id: 'u1', author: { role: 'user' }, content: { content_type: 'text', parts: [`Question about ${c.title}`] } },
+        message: {
+          id: 'u1',
+          author: { role: 'user' },
+          content: {
+            content_type: c.imageFileId ? 'multimodal_text' : 'text',
+            parts: [
+              ...(c.imageFileId ? [{ content_type: 'image_asset_pointer', asset_pointer: `file-service://${c.imageFileId}` }] : []),
+              `Question about ${c.title}`,
+            ],
+          },
+        },
       },
       a1: {
         id: 'a1',

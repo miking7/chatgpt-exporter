@@ -415,6 +415,37 @@ function formatIsoLocal(epochSeconds, timeZone) {
   return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${offset}`;
 }
 
+// src/services/conversation-names.ts
+var UNSAFE_CHARACTERS = /[\\/:*?"<>|#^[\]\p{Cc}]/gu;
+var MAX_TITLE_BYTES = 100;
+function idSuffix(id) {
+  return id.replace(/[^0-9A-Za-z]/g, "").slice(-12).toLowerCase();
+}
+var trimEnds = (text) => text.replace(/^[\s.]+|[\s.]+$/g, "");
+function safeTitle(title) {
+  const cleaned = trimEnds((title ?? "").normalize("NFC").replace(UNSAFE_CHARACTERS, " ").replace(/\s+/g, " "));
+  return trimEnds(truncateUtf8(cleaned, MAX_TITLE_BYTES)) || "Untitled";
+}
+function truncateUtf8(text, maxBytes) {
+  if (Buffer.byteLength(text) <= maxBytes) return text;
+  let cut = "";
+  let bytes = 0;
+  for (const char of text) {
+    bytes += Buffer.byteLength(char);
+    if (bytes > maxBytes) break;
+    cut += char;
+  }
+  const space = cut.lastIndexOf(" ");
+  return space > cut.length / 2 ? cut.slice(0, space) : cut;
+}
+function markdownFileName(id, title, created, timeZone) {
+  const date = created === null ? "undated" : localDate(created, timeZone);
+  return `${date} ${safeTitle(title)} (${idSuffix(id)}).md`;
+}
+function suffixOfMarkdownName(name) {
+  return /\(([0-9a-z]{1,12})\)\.md$/.exec(name)?.[1];
+}
+
 // src/services/file-service.ts
 import fs3 from "fs/promises";
 import path3 from "path";
@@ -774,7 +805,7 @@ function convertConversation(detail, options) {
 }
 
 // src/services/storage-service.ts
-var MARKDOWN_FORMAT = 2;
+var MARKDOWN_FORMAT = 3;
 function projectFolderName(projectName) {
   return projectName.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
@@ -786,17 +817,23 @@ function savedVersionOf(detail) {
 }
 var StorageService = class _StorageService {
   outputDir;
+  /** The JSON: what the sync reads and writes, one `<id>.json` per conversation. */
   conversationsDir;
+  /** The readable Markdown, named by date and title (markdown/, or markdown/projects/<folder>/). */
+  markdownDir;
   /** "Conversations" for the main folder, otherwise the project name. */
   label;
   timeZone;
   fileLinks;
+  /** Markdown file names by id suffix, read once. */
+  markdownFiles;
   constructor(outputDir, options) {
     this.outputDir = outputDir;
     this.timeZone = options.timeZone;
     this.label = options.projectName ?? options.projectFolder ?? "Conversations";
     const folder = options.projectFolder ?? (options.projectName === void 0 ? void 0 : projectFolderName(options.projectName));
     this.conversationsDir = folder === void 0 ? path4.join(outputDir, "conversations") : path4.join(outputDir, "projects", folder, "conversations");
+    this.markdownDir = folder === void 0 ? path4.join(outputDir, "markdown") : path4.join(outputDir, "markdown", "projects", folder);
   }
   /** This archive's folder for a project. */
   forProject(projectName) {
@@ -804,13 +841,12 @@ var StorageService = class _StorageService {
   }
   async initialize() {
     await fs4.mkdir(this.conversationsDir, { recursive: true });
+    await fs4.mkdir(this.markdownDir, { recursive: true });
     await removeStaleTempFiles(this.conversationsDir);
+    await removeStaleTempFiles(this.markdownDir);
   }
   jsonPath(id) {
     return path4.join(this.conversationsDir, `${id}.json`);
-  }
-  markdownPath(id) {
-    return path4.join(this.conversationsDir, `${id}.md`);
   }
   /** Lets Markdown written during the run link to files already downloaded into files/. */
   async loadFileLinks() {
@@ -818,7 +854,7 @@ var StorageService = class _StorageService {
     if (globalMap.size === 0) return;
     this.fileLinks = /* @__PURE__ */ new Map();
     for (const [fileId, filePath] of globalMap) {
-      this.fileLinks.set(fileId, path4.relative(this.conversationsDir, path4.join(this.outputDir, filePath)));
+      this.fileLinks.set(fileId, path4.relative(this.markdownDir, path4.join(this.outputDir, filePath)));
     }
   }
   /**
@@ -841,12 +877,41 @@ var StorageService = class _StorageService {
   }
   /** Rewrites the Markdown only when it changed, then gives it the chat's dates; returns whether it was written. */
   async saveMarkdown(id, data, times) {
-    const file = this.markdownPath(id);
+    const name = markdownFileName(id, data.title, times.created, this.timeZone);
+    const file = path4.join(this.markdownDir, name);
     const markdown = convertConversation(data, { id, timeZone: this.timeZone, fileMap: this.fileLinks });
     const changed = await readTextIfExists(file) !== markdown;
     if (changed) await writeAtomic(file, markdown);
     await stampTimes(file, times);
+    await this.removeOtherMarkdown(id, name);
     return changed;
+  }
+  markdownIndex() {
+    this.markdownFiles ??= (async () => {
+      const index = /* @__PURE__ */ new Map();
+      for (const name of await fs4.readdir(this.markdownDir).catch(() => [])) {
+        const suffix = suffixOfMarkdownName(name);
+        if (suffix === void 0) continue;
+        const names = index.get(suffix) ?? /* @__PURE__ */ new Set();
+        index.set(suffix, names.add(name));
+      }
+      return index;
+    })();
+    return this.markdownFiles;
+  }
+  /** This conversation's Markdown under an earlier title, and the copy beside the JSON written before version 2.0.0-fork.7. */
+  async removeOtherMarkdown(id, keep) {
+    const suffix = idSuffix(id);
+    const index = await this.markdownIndex();
+    const names = index.get(suffix) ?? /* @__PURE__ */ new Set();
+    for (const name of names) {
+      if (name === keep) continue;
+      if (await readFrontMatterId(path4.join(this.markdownDir, name)) !== id) continue;
+      await fs4.rm(path4.join(this.markdownDir, name), { force: true });
+      names.delete(name);
+    }
+    index.set(suffix, names.add(keep));
+    await fs4.rm(path4.join(this.conversationsDir, `${id}.md`), { force: true });
   }
   /** Copies a conversation saved in another folder; returns the version copied. */
   async copyConversationFrom(source, id) {
@@ -911,13 +976,7 @@ var StorageService = class _StorageService {
   async readVersionFromHead(id, buffer) {
     let head;
     try {
-      const handle = await fs4.open(this.jsonPath(id), "r");
-      try {
-        const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-        head = buffer.toString("utf8", 0, bytesRead);
-      } finally {
-        await handle.close();
-      }
+      head = await readHead(this.jsonPath(id), buffer);
     } catch {
       return null;
     }
@@ -940,6 +999,7 @@ async function convertArchive(outputDir, options) {
   if (total > 0) options.onProgress?.(0, total);
   for (const { storage, ids } of work) {
     if (ids.length === 0) continue;
+    await storage.initialize();
     await storage.loadFileLinks();
     for (const id of ids) {
       if (options.signal?.aborted) throw abortError(options.signal);
@@ -966,6 +1026,22 @@ async function stampTimes(filePath, times) {
     if (!birthDone) await fs4.utimes(filePath, stat.atime, created);
     await fs4.utimes(filePath, stat.atime, modified);
   } catch {
+  }
+}
+async function readHead(filePath, buffer) {
+  const handle = await fs4.open(filePath, "r");
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.toString("utf8", 0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+async function readFrontMatterId(filePath) {
+  try {
+    return /^---\r?\nid: (\S+)/.exec(await readHead(filePath, Buffer.alloc(256)))?.[1] ?? null;
+  } catch {
+    return null;
   }
 }
 async function readTextIfExists(filePath) {
@@ -3241,7 +3317,7 @@ async function statusCommand(options) {
 }
 
 // src/cli/index.ts
-var VERSION = "2.0.0-fork.6";
+var VERSION = "2.0.0-fork.7";
 function positiveNumber(flag) {
   return (value) => {
     const n = Number(value);

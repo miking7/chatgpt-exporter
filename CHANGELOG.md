@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.0.0-fork.7
+
+### Changed
+
+- The Markdown moves into a `markdown/` folder (project chats in `markdown/projects/<Project>/`) and is named by the date the chat started, its title and the end of its id: `2026-10-11 Scheduled sync on macOS (3f1e2b4c5d6e).md`. Characters that Windows, network drives, exFAT or Obsidian links can't take are left out of the name. A renamed chat's file is renamed too.
+- The JSON keeps its `conversations/<id>.json` name, so incremental sync works as before.
+- The first backup after updating moves the existing Markdown into `markdown/` (a few seconds, nothing downloaded again) and removes the old `.md` files beside the JSON. `.md` files there that this tool didn't write are left alone.
+- Links to downloaded attachments point from the new folder (`../files/…`).
+
 ## 2.0.0-fork.6
 
 ### Added

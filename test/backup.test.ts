@@ -6,6 +6,7 @@ import path from 'node:path';
 import { ChatGPTClient, type ClientOptions } from '../src/api/client.js';
 import { RequestScheduler, type SchedulerConfig } from '../src/api/scheduler.js';
 import { BackupService, type BackupEvents, type BackupOptions, type BackupResult } from '../src/services/backup-service.js';
+import { idSuffix } from '../src/services/conversation-names.js';
 import { StorageService, convertArchive } from '../src/services/storage-service.js';
 import { SyncStateStore } from '../src/services/sync-state.js';
 import {
@@ -78,6 +79,14 @@ async function harness(
 
 const readJson = async (file: string) => JSON.parse(await fs.readFile(file, 'utf-8'));
 
+/** The one Markdown file for a conversation (named by date, title and the end of its id). */
+async function readMarkdown(dir: string, id: string): Promise<{ name: string; text: string; file: string }> {
+  const names = (await fs.readdir(dir)).filter((name) => name.endsWith(`(${idSuffix(id)}).md`));
+  assert.equal(names.length, 1, `exactly one Markdown file for ${id}, found: ${names.join(', ') || 'none'}`);
+  const file = path.join(dir, names[0]);
+  return { name: names[0], text: await fs.readFile(file, 'utf-8'), file };
+}
+
 test('first run downloads everything newest-first and writes JSON + Markdown', async () => {
   const conversations = makeConversations(5);
   const h = await harness({ conversations });
@@ -92,10 +101,11 @@ test('first run downloads everything newest-first and writes JSON + Markdown', a
     for (const c of conversations) {
       const json = await readJson(path.join(h.out, 'conversations', `${c.id}.json`));
       assert.equal(json.update_time, c.updateTime);
-      const md = await fs.readFile(path.join(h.out, 'conversations', `${c.id}.md`), 'utf-8');
-      assert.match(md, new RegExp(`^# ${c.title}$`, 'm'));
-      assert.match(md, /Answer about/);
+      const md = await readMarkdown(path.join(h.out, 'markdown'), c.id);
+      assert.match(md.text, new RegExp(`^# ${c.title}$`, 'm'));
+      assert.match(md.text, /Answer about/);
     }
+    assert.deepEqual((await fs.readdir(path.join(h.out, 'conversations'))).filter((f) => f.endsWith('.md')), [], 'no Markdown beside the JSON');
     assert.equal((await readJson(path.join(h.out, 'conversations', 'index.json'))).length, 5);
   } finally {
     await h.cleanup();
@@ -109,9 +119,10 @@ test("saved files carry the chat's own dates, and the Markdown shows them in the
     await h.run();
     // Started 2025-06-15 15:05:40 UTC and updated a minute later: the 16th in Brisbane.
     const c = conversations[0];
-    const md = await fs.readFile(path.join(h.out, 'conversations', `${c.id}.md`), 'utf-8');
+    const md = await readMarkdown(path.join(h.out, 'markdown'), c.id);
+    assert.equal(md.name, '2025-06-16 Conversation 0 (000000000000).md');
     assert.equal(
-      md.split('\n').slice(0, 10).join('\n'),
+      md.text.split('\n').slice(0, 10).join('\n'),
       [
         '---',
         `id: ${c.id}`,
@@ -125,8 +136,8 @@ test("saved files carry the chat's own dates, and the Markdown shows them in the
         '*2025-06-16*',
       ].join('\n')
     );
-    for (const file of [`${c.id}.json`, `${c.id}.md`]) {
-      const stat = await fs.stat(path.join(h.out, 'conversations', file));
+    for (const file of [path.join(h.out, 'conversations', `${c.id}.json`), md.file]) {
+      const stat = await fs.stat(file);
       assert.ok(Math.abs(stat.mtimeMs - c.updateTime * 1000) < 2, `${file}: modified when the chat was last updated`);
       if (process.platform === 'darwin') {
         assert.ok(Math.abs(stat.birthtimeMs - (c.updateTime - 60) * 1000) < 2, `${file}: created when the chat started`);
@@ -147,8 +158,9 @@ test('a renamed chat is fetched again even when its update time stayed the same'
     const second = await h.run();
     assert.deepEqual(h.server.requests.slice(mark).filter(isDetail).map(detailId), [conversations[1].id]);
     assert.equal(second.upToDate, 2);
-    const md = await fs.readFile(path.join(h.out, 'conversations', `${conversations[1].id}.md`), 'utf-8');
-    assert.match(md, /^# Renamed chat$/m);
+    const md = await readMarkdown(path.join(h.out, 'markdown'), conversations[1].id);
+    assert.match(md.name, /^2025-06-16 Renamed chat \([0-9a-f]{12}\)\.md$/, 'renamed, and the old file is gone');
+    assert.match(md.text, /^# Renamed chat$/m);
     assert.equal((await h.run()).downloaded, 0);
   } finally {
     await h.cleanup();
@@ -174,17 +186,17 @@ test('convert rewrites only the Markdown that changed and restores the dates', a
   const h = await harness({ conversations });
   try {
     await h.run();
-    const dir = path.join(h.out, 'conversations');
+    const markdownDir = path.join(h.out, 'markdown');
     const [deleted, touched, untouched] = conversations;
-    await fs.rm(path.join(dir, `${deleted.id}.md`));
-    await fs.utimes(path.join(dir, `${touched.id}.json`), new Date(), new Date());
-    const before = await fs.stat(path.join(dir, `${untouched.id}.md`));
+    await fs.rm((await readMarkdown(markdownDir, deleted.id)).file);
+    await fs.utimes(path.join(h.out, 'conversations', `${touched.id}.json`), new Date(), new Date());
+    const before = await fs.stat((await readMarkdown(markdownDir, untouched.id)).file);
 
     assert.deepEqual(await convertArchive(h.out, { timeZone: ZONE }), { converted: 1, unchanged: 2, errors: 0 });
-    await fs.access(path.join(dir, `${deleted.id}.md`));
-    const json = await fs.stat(path.join(dir, `${touched.id}.json`));
+    await readMarkdown(markdownDir, deleted.id);
+    const json = await fs.stat(path.join(h.out, 'conversations', `${touched.id}.json`));
     assert.ok(Math.abs(json.mtimeMs - touched.updateTime * 1000) < 2, 'date restored');
-    const after = await fs.stat(path.join(dir, `${untouched.id}.md`));
+    const after = await fs.stat((await readMarkdown(markdownDir, untouched.id)).file);
     assert.equal(after.ctimeMs, before.ctimeMs, 'a file already right is not touched at all');
 
     assert.deepEqual(await convertArchive(h.out, { timeZone: ZONE }), { converted: 0, unchanged: 3, errors: 0 });
@@ -426,7 +438,7 @@ test('project chats are downloaded once and copied into the project folder', asy
     const projectDir = path.join(h.out, 'projects', 'Log_shipping___S3', 'conversations');
     for (const c of conversations.slice(0, 2)) {
       await fs.access(path.join(projectDir, `${c.id}.json`));
-      await fs.access(path.join(projectDir, `${c.id}.md`));
+      await readMarkdown(path.join(h.out, 'markdown', 'projects', 'Log_shipping___S3'), c.id);
     }
 
     await fs.rm(path.join(projectDir, `${conversations[0].id}.json`));
@@ -496,8 +508,54 @@ test('Ctrl+C stops between requests and keeps what was saved', async () => {
     const result = await h.run({ signal: controller.signal });
     assert.equal(result.stopReason, 'interrupted');
     assert.ok(result.downloaded >= 1 && result.downloaded < 20);
-    const files = await fs.readdir(path.join(h.out, 'conversations'));
+    const files = await fs.readdir(path.join(h.out, 'markdown'));
     assert.equal(files.filter((f) => f.endsWith('.md')).length, result.downloaded);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('Markdown names are safe for any file system, and same-titled chats get their own files', async () => {
+  const conversations = makeConversations(4).map((c, i) => ({
+    ...c,
+    title: ['Notes: a/b <c> "d" |e| ?*#^[x]', '.hidden start...', 'New chat', 'New chat'][i],
+  }));
+  const h = await harness({ conversations });
+  try {
+    await h.run();
+    const names = (await fs.readdir(path.join(h.out, 'markdown'))).filter((f) => f.endsWith('.md')).sort();
+    assert.deepEqual(names, [
+      '2025-06-16 Notes a b c d e x (000000000000).md',
+      '2025-06-16 hidden start (000000000001).md',
+      '2025-06-16 New chat (000000000002).md',
+      '2025-06-16 New chat (000000000003).md',
+    ].sort());
+    const md = await readMarkdown(path.join(h.out, 'markdown'), conversations[0].id);
+    assert.match(md.text, /^title: "Notes: a\/b <c> \\"d\\" \|e\| \?\*#\^\[x\]"$/m, 'the full title is kept inside the file');
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('Markdown beside the JSON (from earlier versions) moves into markdown/, with attachment links that still work', async () => {
+  const conversations = makeConversations(2).map((c, i) => (i === 0 ? { ...c, imageFileId: 'file-abc123' } : c));
+  const h = await harness({ conversations });
+  try {
+    await fs.mkdir(path.join(h.out, 'files', 'file-abc123'), { recursive: true });
+    await fs.writeFile(path.join(h.out, 'files', 'file-abc123', 'photo.png'), 'png');
+    await h.run();
+    const md = await readMarkdown(path.join(h.out, 'markdown'), conversations[0].id);
+    assert.match(md.text, /!\[image\]\(\.\.\/files\/file-abc123\/photo\.png\)/);
+
+    // An archive from before version 2.0.0-fork.7: Markdown beside the JSON, none in markdown/.
+    await fs.rm(path.join(h.out, 'markdown'), { recursive: true });
+    for (const c of conversations) await fs.writeFile(path.join(h.out, 'conversations', `${c.id}.md`), '# Old format\n');
+    await fs.writeFile(path.join(h.out, 'conversations', 'notes.md'), 'my own file');
+
+    assert.deepEqual(await convertArchive(h.out, { timeZone: ZONE }), { converted: 2, unchanged: 0, errors: 0 });
+    for (const c of conversations) await readMarkdown(path.join(h.out, 'markdown'), c.id);
+    assert.deepEqual((await fs.readdir(path.join(h.out, 'conversations'))).filter((f) => f.endsWith('.md')), ['notes.md'], 'only files it wrote are removed');
+    assert.match((await readMarkdown(path.join(h.out, 'markdown'), conversations[0].id)).text, /\(\.\.\/files\/file-abc123\/photo\.png\)/);
   } finally {
     await h.cleanup();
   }
