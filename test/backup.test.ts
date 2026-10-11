@@ -6,7 +6,7 @@ import path from 'node:path';
 import { ChatGPTClient, type ClientOptions } from '../src/api/client.js';
 import { RequestScheduler, type SchedulerConfig } from '../src/api/scheduler.js';
 import { BackupService, type BackupEvents, type BackupOptions, type BackupResult } from '../src/services/backup-service.js';
-import { StorageService } from '../src/services/storage-service.js';
+import { StorageService, convertArchive } from '../src/services/storage-service.js';
 import { SyncStateStore } from '../src/services/sync-state.js';
 import {
   fakeJwt,
@@ -18,6 +18,8 @@ import {
 } from './helpers/mock-chatgpt.js';
 
 const TOKEN = fakeJwt();
+/** UTC+10 all year: the fixtures' times fall on the next day there, so a UTC date would show up as wrong. */
+const ZONE = 'Australia/Brisbane';
 const isDetail = (r: RequestRecord) => r.path.startsWith('/backend-api/conversation/');
 const isMainList = (r: RequestRecord) => r.path.startsWith('/backend-api/conversations?') && !r.path.includes('is_archived');
 const detailId = (r: RequestRecord) => r.path.split('/').pop()!;
@@ -51,7 +53,7 @@ async function harness(
   });
   const client = new ChatGPTClient(TOKEN, { scheduler, baseUrl: server.url, ...clientOptions });
   const out = path.join(dir, 'out');
-  const storage = new StorageService(out);
+  const storage = new StorageService(out, { timeZone: ZONE });
 
   return {
     server,
@@ -91,10 +93,102 @@ test('first run downloads everything newest-first and writes JSON + Markdown', a
       const json = await readJson(path.join(h.out, 'conversations', `${c.id}.json`));
       assert.equal(json.update_time, c.updateTime);
       const md = await fs.readFile(path.join(h.out, 'conversations', `${c.id}.md`), 'utf-8');
-      assert.match(md, new RegExp(`^# ${c.title}`));
+      assert.match(md, new RegExp(`^# ${c.title}$`, 'm'));
       assert.match(md, /Answer about/);
     }
     assert.equal((await readJson(path.join(h.out, 'conversations', 'index.json'))).length, 5);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("saved files carry the chat's own dates, and the Markdown shows them in the user's time zone", async () => {
+  const conversations = makeConversations(2);
+  const h = await harness({ conversations });
+  try {
+    await h.run();
+    // Started 2025-06-15 15:05:40 UTC and updated a minute later: the 16th in Brisbane.
+    const c = conversations[0];
+    const md = await fs.readFile(path.join(h.out, 'conversations', `${c.id}.md`), 'utf-8');
+    assert.equal(
+      md.split('\n').slice(0, 10).join('\n'),
+      [
+        '---',
+        `id: ${c.id}`,
+        `url: https://chatgpt.com/c/${c.id}`,
+        `title: "${c.title}"`,
+        'created: 2025-06-16T01:05:40+10:00',
+        'updated: 2025-06-16T01:06:40+10:00',
+        '---',
+        '',
+        `# ${c.title}`,
+        '*2025-06-16*',
+      ].join('\n')
+    );
+    for (const file of [`${c.id}.json`, `${c.id}.md`]) {
+      const stat = await fs.stat(path.join(h.out, 'conversations', file));
+      assert.ok(Math.abs(stat.mtimeMs - c.updateTime * 1000) < 2, `${file}: modified when the chat was last updated`);
+      if (process.platform === 'darwin') {
+        assert.ok(Math.abs(stat.birthtimeMs - (c.updateTime - 60) * 1000) < 2, `${file}: created when the chat started`);
+      }
+    }
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a renamed chat is fetched again even when its update time stayed the same', async () => {
+  const conversations = makeConversations(3);
+  const h = await harness({ conversations });
+  try {
+    await h.run();
+    h.server.conversations.get(conversations[1].id)!.title = 'Renamed chat';
+    const mark = h.server.requests.length;
+    const second = await h.run();
+    assert.deepEqual(h.server.requests.slice(mark).filter(isDetail).map(detailId), [conversations[1].id]);
+    assert.equal(second.upToDate, 2);
+    const md = await fs.readFile(path.join(h.out, 'conversations', `${conversations[1].id}.md`), 'utf-8');
+    assert.match(md, /^# Renamed chat$/m);
+    assert.equal((await h.run()).downloaded, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('a title the list and the conversation disagree on is fetched once, not every run', async () => {
+  const conversations = makeConversations(2).map((c, i) => (i === 0 ? { ...c, detailTitle: 'Title inside the chat' } : c));
+  const h = await harness({ conversations });
+  try {
+    assert.equal((await h.run()).downloaded, 2);
+    assert.equal((await h.run()).downloaded, 0, 'the difference is remembered after a download');
+    h.server.conversations.get(conversations[0].id)!.title = 'Renamed in the list';
+    assert.equal((await h.run()).downloaded, 1, 'a new listed title is checked again');
+    assert.equal((await h.run()).downloaded, 0);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test('convert rewrites only the Markdown that changed and restores the dates', async () => {
+  const conversations = makeConversations(3);
+  const h = await harness({ conversations });
+  try {
+    await h.run();
+    const dir = path.join(h.out, 'conversations');
+    const [deleted, touched, untouched] = conversations;
+    await fs.rm(path.join(dir, `${deleted.id}.md`));
+    await fs.utimes(path.join(dir, `${touched.id}.json`), new Date(), new Date());
+    const before = await fs.stat(path.join(dir, `${untouched.id}.md`));
+
+    assert.deepEqual(await convertArchive(h.out, { timeZone: ZONE }), { converted: 1, unchanged: 2, errors: 0 });
+    await fs.access(path.join(dir, `${deleted.id}.md`));
+    const json = await fs.stat(path.join(dir, `${touched.id}.json`));
+    assert.ok(Math.abs(json.mtimeMs - touched.updateTime * 1000) < 2, 'date restored');
+    const after = await fs.stat(path.join(dir, `${untouched.id}.md`));
+    assert.equal(after.ctimeMs, before.ctimeMs, 'a file already right is not touched at all');
+
+    assert.deepEqual(await convertArchive(h.out, { timeZone: ZONE }), { converted: 0, unchanged: 3, errors: 0 });
+    assert.deepEqual(await convertArchive(h.out, { timeZone: 'UTC' }), { converted: 3, unchanged: 0, errors: 0 }, 'a new time zone changes every date');
   } finally {
     await h.cleanup();
   }

@@ -20,6 +20,11 @@ export interface SyncState {
   /** When the whole conversation list was last read (rather than stopping at the first unchanged page). */
   lastFullListingAt?: string;
   failures: Record<string, FailureRecord>;
+  /**
+   * Listed titles that a fresh download didn't match (ChatGPT's list and the conversation itself disagreed),
+   * so the difference doesn't fetch the conversation again every run.
+   */
+  titleMismatches?: Record<string, string>;
 }
 
 /** Per-output-folder state, stored in <output>/.sync-state.json. */
@@ -37,7 +42,12 @@ export class SyncStateStore {
     let state: SyncState = { version: 1, failures: {} };
     try {
       const parsed = JSON.parse(await fs.readFile(filePath, 'utf-8')) as Partial<SyncState>;
-      state = { version: 1, lastFullListingAt: parsed.lastFullListingAt, failures: parsed.failures ?? {} };
+      state = {
+        version: 1,
+        lastFullListingAt: parsed.lastFullListingAt,
+        failures: parsed.failures ?? {},
+        titleMismatches: parsed.titleMismatches,
+      };
     } catch {
       // No state yet.
     }
@@ -64,6 +74,20 @@ export class SyncStateStore {
 
   clearFailure(id: string): void {
     delete this.state.failures[id];
+  }
+
+  /** This listed title was already fetched once, and the conversation itself had another title. */
+  knownTitleMismatch(id: string, listedTitle: string): boolean {
+    return this.state.titleMismatches?.[id] === listedTitle;
+  }
+
+  /** After a download: remembers a listed title the conversation didn't match, or forgets an old one. */
+  noteTitle(id: string, listedTitle: string | null | undefined, savedTitle: string | null | undefined): void {
+    if (typeof listedTitle === 'string' && listedTitle !== '' && listedTitle !== savedTitle) {
+      (this.state.titleMismatches ??= {})[id] = listedTitle;
+    } else if (this.state.titleMismatches && id in this.state.titleMismatches) {
+      delete this.state.titleMismatches[id];
+    }
   }
 
   parkedCount(): number {

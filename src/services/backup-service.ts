@@ -8,7 +8,7 @@ import {
   type ConversationItem,
   type SidebarItem,
 } from '../api/types.js';
-import { StorageService } from './storage-service.js';
+import { savedVersionOf, type SavedVersion, type StorageService } from './storage-service.js';
 import type { SyncStateStore } from './sync-state.js';
 import { abortError, isAbortError, toEpochSeconds } from '../utils/time.js';
 import { errorMessage } from '../utils/format.js';
@@ -145,7 +145,7 @@ class BackupRun {
   private readonly tracked = new Map<string, Tracked>();
   /** Ids waiting to be downloaded (picked newest first). */
   private readonly queue: string[] = [];
-  private readonly savedVersions = new Map<StorageService, Map<string, number | null>>();
+  private readonly savedVersions = new Map<StorageService, Map<string, SavedVersion>>();
   /** Lets the run stop the listing without stopping everything (and vice versa via the run's signal). */
   private readonly stopListing = new AbortController();
   private readonly listSignal: AbortSignal;
@@ -256,7 +256,7 @@ class BackupRun {
 
   // ── Deciding what each listed conversation needs ──────────────────────────
 
-  private async savedVersion(storage: StorageService, id: string): Promise<number | null> {
+  private async savedVersion(storage: StorageService, id: string): Promise<SavedVersion | null> {
     let versions = this.savedVersions.get(storage);
     if (!versions) {
       versions = await storage.loadSavedVersions();
@@ -265,9 +265,19 @@ class BackupRun {
     return versions.get(id) ?? null;
   }
 
+  /**
+   * Renaming a chat doesn't always change its update_time, so titles are compared too. A listed title that a
+   * fresh download already didn't match (the list and the conversation disagree) doesn't count.
+   */
+  private renamed(id: string, saved: SavedVersion, item: ConversationItem): boolean {
+    const listed = item.title;
+    if (typeof listed !== 'string' || listed === '' || listed === saved.title) return false;
+    return !this.sync.knownTitleMismatch(id, listed);
+  }
+
   private async save(storage: StorageService, id: string, detail: ConversationDetail): Promise<void> {
     await storage.saveConversation(id, detail);
-    this.savedVersions.get(storage)?.set(id, detail.update_time ?? null);
+    this.savedVersions.get(storage)?.set(id, savedVersionOf(detail));
   }
 
   private async copy(from: StorageService, to: StorageService, id: string): Promise<void> {
@@ -281,7 +291,7 @@ class BackupRun {
     const id = item.id;
     const listed = toEpochSeconds(item.update_time);
     const saved = this.options.full ? null : await this.savedVersion(storage, id);
-    const upToDate = isUpToDate(saved, listed);
+    const upToDate = saved !== null && isUpToDate(saved.updateTime, listed) && !this.renamed(id, saved, item);
     const tracked = this.tracked.get(id);
 
     if (!tracked) {
@@ -465,7 +475,7 @@ class BackupRun {
       const name = project.gizmo.display.name;
       try {
         const items = await fetchProjectConversations(this.client, project.gizmo.id, { signal: this.listSignal });
-        const storage = new StorageService(this.mainStorage.outputDir, name);
+        const storage = this.mainStorage.forProject(name);
         await storage.initialize();
         await storage.loadFileLinks();
         await storage.saveIndex(items);
@@ -538,6 +548,7 @@ class BackupRun {
         this.result.downloaded += 1;
         consecutiveFailures = 0;
         this.sync.clearFailure(id);
+        this.sync.noteTitle(id, tracked.item.title, detail.title);
         await this.log(`Downloaded: ${id} - ${entry.title}`);
         this.events.onDownloaded?.(entry, this.attempted);
       } catch (error) {

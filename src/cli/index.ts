@@ -8,7 +8,7 @@ import { projectsCommand } from './commands/projects.js';
 import { statusCommand } from './commands/status.js';
 import { CLI_NAME } from './runtime.js';
 
-export const VERSION = '2.0.0-fork.5';
+export const VERSION = '2.0.0-fork.6';
 
 function positiveNumber(flag: string) {
   return (value: string): number => {
@@ -141,7 +141,7 @@ export function createCli(): Command {
 
   program
     .command('convert')
-    .description('Regenerate every Markdown file from the saved JSON (no network requests)')
+    .description("Regenerate the Markdown files and restore the files' dates from the saved JSON (no network requests)")
     .option('-o, --output <dir>', 'output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)')
     .action(async (opts) => {
       process.exitCode = await convertCommand({ output: opts.output });

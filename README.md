@@ -95,6 +95,7 @@ Settings are kept in a per-user folder, so the tool finds them wherever it's run
 
 ```bash
 CHATGPT_EXPORT_DIR="/Users/you/Documents/chatgpt-export"
+CHATGPT_TIMEZONE=Australia/Melbourne   # saved on the first run
 CHATGPT_PACE_SECONDS=90   # optional
 CHATGPT_BURST=30          # optional
 ```
@@ -115,6 +116,10 @@ chatgpt-export/
   backup.log              # what happened, run by run
   .sync-state.json        # when the list was last read in full; chats that keep failing
 ```
+
+Each conversation's files carry the chat's own dates: in Finder, **Date Created** is when the chat started and **Date Modified** is when it last changed (Linux and Windows get Date Modified only). **Date Added** shows when the backup last wrote the file. Each Markdown file starts with a small YAML header (`id`, a `url` back to the chat, `title`, `created`, `updated`) that Obsidian and other editors can sort and filter on.
+
+Dates are shown in your time zone, which the first run saves as `CHATGPT_TIMEZONE`, so they don't shift when you travel. Change it there if you like; the next backup redoes the Markdown to match.
 
 ## Commands and options
 
@@ -148,7 +153,7 @@ Other commands:
 - `logout`: remove the saved token.
 - `list [--archived] [--project <name>] [--json]`: list conversations without downloading.
 - `projects [--json]`: list projects.
-- `convert`: regenerate every `.md` from the saved `.json` files.
+- `convert`: regenerate every `.md` from the saved `.json` files and restore the files' dates. Only files whose content changed are rewritten. A backup does this by itself after an update that changes the Markdown.
 
 ## Already have an archive from the original tool?
 
@@ -160,6 +165,7 @@ This fork reads the same layout. Run `backup` from the folder that contains your
 - **Scheduled runs can't reach ChatGPT, but it works from Terminal:** a per-app firewall. Little Snitch, for example, allows `node` when you run it from Terminal but not when launchd starts it: add a rule allowing `node` (Homebrew's, under `/opt/homebrew/Cellar/node/…/bin/node`) to connect to `chatgpt.com` on port 443. Unattended runs post a notification once a day while this persists.
 - **"ChatGPT asked us to slow down":** the tool is already pausing. If it happens often, raise `--pace`. `status` shows when the cooldown ends.
 - **The backup stopped overnight:** check `backup.log`. If the Mac went to sleep, the next run carries on; `--no-keep-awake` disables the sleep prevention if you'd rather not have it.
+- **A renamed chat still has its old title:** recent chats are picked up on the next run. For older ones, ChatGPT doesn't always move a renamed chat up the list, so the rename is noticed at the monthly full listing; `backup --refresh-list` picks it up now.
 - **Short Markdown files:** normal for short chats. System messages and internal tool calls are skipped. The `.json` has everything.
 
 ## Privacy & security
@@ -178,7 +184,8 @@ This tool runs entirely on your machine. It only talks to OpenAI's servers (`cha
 | Settings and archive | `--token` flag; archive relative to the current folder | Per-user settings folder; absolute archive folder chosen once |
 | Ctrl+C | Ignored while a spinner is showing | Stops gracefully at any point |
 | Archived chats | Not backed up | Included |
-| Markdown | Only written when the whole run finishes | Written as each conversation is saved |
+| Markdown | Only written when the whole run finishes | Written as each conversation is saved, with a YAML header and dates in your time zone |
+| File dates | The download time | The chat's own dates (Finder's Date Created and Date Modified) |
 | Project chats | Downloaded twice | Downloaded once, then copied |
 | Extras | | `status`, `--max-downloads`, `--since`, `logout`, `convert`, a lock against overlapping runs, deleted chats aren't retried forever |
 

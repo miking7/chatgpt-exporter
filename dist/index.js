@@ -82,6 +82,8 @@ var ENV = {
   exportDir: "CHATGPT_EXPORT_DIR",
   pace: "CHATGPT_PACE_SECONDS",
   burst: "CHATGPT_BURST",
+  /** IANA time zone for dates in the Markdown and its file names; saved on the first run. */
+  timeZone: "CHATGPT_TIMEZONE",
   /** Overrides the config folder (e.g. one folder per workspace). */
   home: "CHATGPT_EXPORTER_HOME"
 };
@@ -94,6 +96,7 @@ var CONFIG_HEADER = `# chatgpt-exporter settings (KEY=VALUE, the same format as 
 # CHATGPT_EXPORT_DIR     folder the archive is kept in
 # CHATGPT_PACE_SECONDS   average seconds between conversation downloads (default ${DEFAULT_PACE_SECONDS})
 # CHATGPT_BURST          downloads allowed back-to-back after a quiet period (default ${DEFAULT_BURST})
+# CHATGPT_TIMEZONE       time zone for dates in the archive (set to this computer's zone on the first run)
 `;
 function expandHome(p) {
   return p === "~" || p.startsWith("~/") ? path2.join(os.homedir(), p.slice(1)) : p;
@@ -132,6 +135,21 @@ function isOutputDirConfigured(settings) {
 function resolveOutputDir(settings, flag) {
   return path2.resolve(expandHome(flag ?? getSetting(settings, ENV.exportDir) ?? defaultOutputDir()));
 }
+function resolveTimeZone(settings) {
+  const configured = getSetting(settings, ENV.timeZone);
+  if (configured === void 0) return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: configured });
+  } catch {
+    throw new Error(`${ENV.timeZone} must be a time zone such as Australia/Melbourne (got "${configured}")`);
+  }
+  return configured;
+}
+async function ensureTimeZone(settings) {
+  const zone = resolveTimeZone(settings);
+  if (getSetting(settings, ENV.timeZone) === void 0) await saveSettings(settings, { [ENV.timeZone]: zone });
+  return zone;
+}
 async function saveSettings(settings, updates) {
   await updateEnvFile(settings.configPath, updates, CONFIG_HEADER);
   for (const [key, value] of Object.entries(updates)) {
@@ -147,8 +165,8 @@ function clearSavedToken(settings) {
 }
 
 // src/cli/commands/backup.ts
-import fs11 from "fs/promises";
-import path12 from "path";
+import fs10 from "fs/promises";
+import path11 from "path";
 import chalk5 from "chalk";
 
 // src/api/pagination.ts
@@ -325,31 +343,8 @@ var NotFoundError = class extends HttpError {
 };
 
 // src/services/storage-service.ts
-import fs5 from "fs/promises";
-import path5 from "path";
-
-// src/services/file-service.ts
-import fs3 from "fs/promises";
-import path3 from "path";
-
-// src/api/endpoints.ts
-var DEFAULT_BASE_URL = "https://chatgpt.com";
-var ENDPOINTS = {
-  SESSION: "/api/auth/session",
-  CONVERSATIONS: "/backend-api/conversations",
-  CONVERSATION: (id) => `/backend-api/conversation/${id}`,
-  PROJECTS_SIDEBAR: "/backend-api/gizmos/snorlax/sidebar",
-  PROJECT_CONVERSATIONS: (gizmoId) => `/backend-api/gizmos/${gizmoId}/conversations`,
-  FILE_DOWNLOAD: (fileId) => `/backend-api/files/download/${fileId}`
-};
-function resolveBaseUrl(explicit) {
-  if (explicit) return explicit.replace(/\/+$/, "");
-  const fromEnv = process.env.CHATGPT_BASE_URL;
-  if (fromEnv && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(fromEnv)) {
-    return fromEnv.replace(/\/+$/, "");
-  }
-  return DEFAULT_BASE_URL;
-}
+import fs4 from "fs/promises";
+import path4 from "path";
 
 // src/utils/time.ts
 function abortError(signal) {
@@ -388,6 +383,59 @@ function toEpochSeconds(value) {
   if (typeof value !== "string" || value === "") return null;
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms / 1e3;
+}
+var zoneFormatters = /* @__PURE__ */ new Map();
+function zoneParts(epochSeconds, timeZone) {
+  let formatter = zoneFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "longOffset"
+    });
+    zoneFormatters.set(timeZone, formatter);
+  }
+  const parts = {};
+  for (const part of formatter.formatToParts(new Date(epochSeconds * 1e3))) parts[part.type] = part.value;
+  return parts;
+}
+function localDate(epochSeconds, timeZone) {
+  const p = zoneParts(epochSeconds, timeZone);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+function formatIsoLocal(epochSeconds, timeZone) {
+  const p = zoneParts(epochSeconds, timeZone);
+  const offset = p.timeZoneName === "GMT" ? "+00:00" : p.timeZoneName.replace("GMT", "");
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${offset}`;
+}
+
+// src/services/file-service.ts
+import fs3 from "fs/promises";
+import path3 from "path";
+
+// src/api/endpoints.ts
+var DEFAULT_BASE_URL = "https://chatgpt.com";
+var ENDPOINTS = {
+  SESSION: "/api/auth/session",
+  CONVERSATIONS: "/backend-api/conversations",
+  CONVERSATION: (id) => `/backend-api/conversation/${id}`,
+  PROJECTS_SIDEBAR: "/backend-api/gizmos/snorlax/sidebar",
+  PROJECT_CONVERSATIONS: (gizmoId) => `/backend-api/gizmos/${gizmoId}/conversations`,
+  FILE_DOWNLOAD: (fileId) => `/backend-api/files/download/${fileId}`
+};
+function resolveBaseUrl(explicit) {
+  if (explicit) return explicit.replace(/\/+$/, "");
+  const fromEnv = process.env.CHATGPT_BASE_URL;
+  if (fromEnv && /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/.test(fromEnv)) {
+    return fromEnv.replace(/\/+$/, "");
+  }
+  return DEFAULT_BASE_URL;
 }
 
 // src/services/file-service.ts
@@ -589,8 +637,6 @@ async function buildFileMap(filesDir) {
 }
 
 // src/services/markdown-service.ts
-import fs4 from "fs/promises";
-import path4 from "path";
 function extractTextFromParts(parts, fileMap) {
   const pieces = [];
   for (const part of parts) {
@@ -615,13 +661,13 @@ function extractTextFromParts(parts, fileMap) {
 }
 function getLinearThread(mapping, currentNode) {
   if (currentNode && mapping[currentNode]) {
-    const path15 = [];
+    const path13 = [];
     let nodeId = currentNode;
     while (nodeId && mapping[nodeId]) {
-      path15.unshift(mapping[nodeId]);
+      path13.unshift(mapping[nodeId]);
       nodeId = mapping[nodeId].parent;
     }
-    return path15;
+    return path13;
   }
   let root;
   for (const node of Object.values(mapping)) {
@@ -642,10 +688,6 @@ function getLinearThread(mapping, currentNode) {
   }
   return thread;
 }
-function formatDate(timestamp) {
-  const date = new Date(timestamp * 1e3);
-  return date.toISOString().split("T")[0];
-}
 function formatRole(role) {
   switch (role) {
     case "user":
@@ -656,12 +698,43 @@ function formatRole(role) {
       return role.charAt(0).toUpperCase() + role.slice(1);
   }
 }
-function convertConversation(detail, fileMap) {
-  const lines = [];
+var isTimestamp = (value) => typeof value === "number" && Number.isFinite(value) && value > 0;
+function conversationTimes(detail) {
+  const ownCreated = isTimestamp(detail.create_time) ? detail.create_time : null;
+  const ownUpdated = isTimestamp(detail.update_time) ? detail.update_time : null;
+  if (ownCreated !== null && ownUpdated !== null) return { created: ownCreated, updated: ownUpdated };
+  let first = null;
+  let last = null;
+  for (const node of Object.values(detail.mapping ?? {})) {
+    const time = node.message?.create_time;
+    if (!isTimestamp(time)) continue;
+    if (first === null || time < first) first = time;
+    if (last === null || time > last) last = time;
+  }
+  const created = ownCreated ?? first ?? ownUpdated;
+  return { created, updated: ownUpdated ?? last ?? created };
+}
+function frontMatter(detail, options, times) {
+  const lines = [
+    "---",
+    `id: ${options.id}`,
+    `url: https://chatgpt.com/c/${options.id}`,
+    // A JSON string is also a valid YAML double-quoted string, whatever the title contains.
+    `title: ${JSON.stringify(detail.title ?? "Untitled")}`
+  ];
+  if (times.created !== null) lines.push(`created: ${formatIsoLocal(times.created, options.timeZone)}`);
+  if (times.updated !== null) lines.push(`updated: ${formatIsoLocal(times.updated, options.timeZone)}`);
+  lines.push("---", "");
+  return lines;
+}
+function convertConversation(detail, options) {
+  const { fileMap } = options;
+  const times = conversationTimes(detail);
+  const lines = frontMatter(detail, options, times);
   const title = detail.title ?? "Untitled";
   lines.push(`# ${title}`);
-  if (detail.create_time) {
-    lines.push(`*${formatDate(detail.create_time)}*`);
+  if (times.created !== null) {
+    lines.push(`*${localDate(times.created, options.timeZone)}*`);
   }
   const thread = getLinearThread(
     detail.mapping,
@@ -699,167 +772,146 @@ function convertConversation(detail, fileMap) {
   lines.push("");
   return lines.join("\n");
 }
-async function findJsonFiles2(dir) {
-  const files = [];
-  try {
-    const entries = await fs4.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path4.join(dir, entry.name);
-      if (entry.isFile() && entry.name.endsWith(".json") && entry.name !== "index.json") {
-        files.push(fullPath);
-      }
-    }
-  } catch {
-  }
-  return files;
-}
-async function collectAllJsonFiles2(inputDir) {
-  const files = [];
-  const mainDir = path4.join(inputDir, "conversations");
-  files.push(...await findJsonFiles2(mainDir));
-  const projectsDir = path4.join(inputDir, "projects");
-  try {
-    const projectEntries = await fs4.readdir(projectsDir, { withFileTypes: true });
-    for (const entry of projectEntries) {
-      if (entry.isDirectory()) {
-        const projectConvDir = path4.join(projectsDir, entry.name, "conversations");
-        files.push(...await findJsonFiles2(projectConvDir));
-      }
-    }
-  } catch {
-  }
-  return files;
-}
-async function convertDirectory(inputDir, filesDir) {
-  const jsonFiles = await collectAllJsonFiles2(inputDir);
-  const globalFileMap = filesDir ? await buildFileMap(filesDir) : null;
-  let converted = 0;
-  let errors = 0;
-  for (const jsonPath of jsonFiles) {
-    try {
-      const raw = await fs4.readFile(jsonPath, "utf-8");
-      const detail = JSON.parse(raw);
-      let fileMap;
-      if (globalFileMap && globalFileMap.size > 0) {
-        fileMap = /* @__PURE__ */ new Map();
-        const mdDir = path4.dirname(jsonPath);
-        for (const [fileId, filePath] of globalFileMap) {
-          const absFilePath = path4.join(inputDir, filePath);
-          const relativePath = path4.relative(mdDir, absFilePath);
-          fileMap.set(fileId, relativePath);
-        }
-      }
-      const markdown = convertConversation(detail, fileMap);
-      const mdPath = jsonPath.replace(/\.json$/, ".md");
-      await fs4.writeFile(mdPath, markdown, "utf-8");
-      converted++;
-    } catch {
-      errors++;
-    }
-  }
-  return { converted, errors };
-}
 
 // src/services/storage-service.ts
+var MARKDOWN_FORMAT = 2;
 function projectFolderName(projectName) {
   return projectName.replace(/[^a-zA-Z0-9_-]/g, "_");
 }
-var StorageService = class {
+function savedVersionOf(detail) {
+  return {
+    updateTime: typeof detail.update_time === "number" ? detail.update_time : null,
+    title: typeof detail.title === "string" ? detail.title : null
+  };
+}
+var StorageService = class _StorageService {
   outputDir;
   conversationsDir;
   /** "Conversations" for the main folder, otherwise the project name. */
   label;
+  timeZone;
   fileLinks;
-  constructor(outputDir, projectName) {
+  constructor(outputDir, options) {
     this.outputDir = outputDir;
-    this.label = projectName ?? "Conversations";
-    this.conversationsDir = projectName ? path5.join(outputDir, "projects", projectFolderName(projectName), "conversations") : path5.join(outputDir, "conversations");
+    this.timeZone = options.timeZone;
+    this.label = options.projectName ?? options.projectFolder ?? "Conversations";
+    const folder = options.projectFolder ?? (options.projectName === void 0 ? void 0 : projectFolderName(options.projectName));
+    this.conversationsDir = folder === void 0 ? path4.join(outputDir, "conversations") : path4.join(outputDir, "projects", folder, "conversations");
+  }
+  /** This archive's folder for a project. */
+  forProject(projectName) {
+    return new _StorageService(this.outputDir, { timeZone: this.timeZone, projectName });
   }
   async initialize() {
-    await fs5.mkdir(this.conversationsDir, { recursive: true });
+    await fs4.mkdir(this.conversationsDir, { recursive: true });
+    await removeStaleTempFiles(this.conversationsDir);
   }
   jsonPath(id) {
-    return path5.join(this.conversationsDir, `${id}.json`);
+    return path4.join(this.conversationsDir, `${id}.json`);
   }
   markdownPath(id) {
-    return path5.join(this.conversationsDir, `${id}.md`);
+    return path4.join(this.conversationsDir, `${id}.md`);
   }
   /** Lets Markdown written during the run link to files already downloaded into files/. */
   async loadFileLinks() {
-    const globalMap = await buildFileMap(path5.join(this.outputDir, "files"));
+    const globalMap = await buildFileMap(path4.join(this.outputDir, "files"));
     if (globalMap.size === 0) return;
     this.fileLinks = /* @__PURE__ */ new Map();
     for (const [fileId, filePath] of globalMap) {
-      this.fileLinks.set(fileId, path5.relative(this.conversationsDir, path5.join(this.outputDir, filePath)));
+      this.fileLinks.set(fileId, path4.relative(this.conversationsDir, path4.join(this.outputDir, filePath)));
     }
   }
-  /** Writes the JSON and its Markdown straight away, so an interrupted run leaves no gaps. */
+  /**
+   * Writes the Markdown and the JSON straight away, so an interrupted run leaves no gaps. The Markdown goes
+   * first: the JSON is what marks a conversation as saved, so a save cut short in between is redone next run.
+   */
   async saveConversation(id, data) {
+    const times = conversationTimes(data);
+    await this.saveMarkdown(id, data, times);
     await writeAtomic(this.jsonPath(id), JSON.stringify(data, null, 2));
-    await writeAtomic(this.markdownPath(id), convertConversation(data, this.fileLinks));
+    await stampTimes(this.jsonPath(id), times);
   }
-  /** Copies a conversation saved in another folder; returns its update_time. */
+  /** Regenerates one conversation's Markdown from its saved JSON and restores both files' dates. */
+  async refreshMarkdown(id) {
+    const data = JSON.parse(await fs4.readFile(this.jsonPath(id), "utf-8"));
+    const times = conversationTimes(data);
+    const written = await this.saveMarkdown(id, data, times);
+    await stampTimes(this.jsonPath(id), times);
+    return written ? "written" : "unchanged";
+  }
+  /** Rewrites the Markdown only when it changed, then gives it the chat's dates; returns whether it was written. */
+  async saveMarkdown(id, data, times) {
+    const file = this.markdownPath(id);
+    const markdown = convertConversation(data, { id, timeZone: this.timeZone, fileMap: this.fileLinks });
+    const changed = await readTextIfExists(file) !== markdown;
+    if (changed) await writeAtomic(file, markdown);
+    await stampTimes(file, times);
+    return changed;
+  }
+  /** Copies a conversation saved in another folder; returns the version copied. */
   async copyConversationFrom(source, id) {
-    const detail = JSON.parse(await fs5.readFile(source.jsonPath(id), "utf-8"));
+    const detail = JSON.parse(await fs4.readFile(source.jsonPath(id), "utf-8"));
     await this.saveConversation(id, detail);
-    return typeof detail.update_time === "number" ? detail.update_time : null;
+    return savedVersionOf(detail);
   }
   async saveIndex(conversations) {
-    await writeAtomic(path5.join(this.conversationsDir, "index.json"), JSON.stringify(conversations, null, 2));
+    await writeAtomic(path4.join(this.conversationsDir, "index.json"), JSON.stringify(conversations, null, 2));
   }
   async loadIndex() {
     try {
-      const parsed = JSON.parse(await fs5.readFile(path5.join(this.conversationsDir, "index.json"), "utf-8"));
+      const parsed = JSON.parse(await fs4.readFile(path4.join(this.conversationsDir, "index.json"), "utf-8"));
       return Array.isArray(parsed) ? parsed : null;
     } catch {
       return null;
     }
   }
   async appendLog(message) {
-    const filePath = path5.join(this.outputDir, "backup.log");
-    await fs5.appendFile(filePath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${message}
+    const filePath = path4.join(this.outputDir, "backup.log");
+    await fs4.appendFile(filePath, `[${(/* @__PURE__ */ new Date()).toISOString()}] ${message}
 `, "utf-8");
   }
   async conversationExists(id) {
     try {
-      await fs5.access(this.jsonPath(id));
+      await fs4.access(this.jsonPath(id));
       return true;
     } catch {
       return false;
     }
   }
-  async getExistingConversationUpdateTime(id) {
+  /** Ids of the conversations saved in this folder. */
+  async savedIds() {
+    let names;
     try {
-      const data = JSON.parse(await fs5.readFile(this.jsonPath(id), "utf-8"));
-      return typeof data.update_time === "number" ? data.update_time : null;
+      names = await fs4.readdir(this.conversationsDir);
+    } catch {
+      return [];
+    }
+    return names.filter((name) => name.endsWith(".json") && name !== "index.json").map((name) => name.slice(0, -".json".length));
+  }
+  async getExistingConversationVersion(id) {
+    try {
+      return savedVersionOf(JSON.parse(await fs4.readFile(this.jsonPath(id), "utf-8")));
     } catch {
       return null;
     }
   }
   /**
-   * update_time of every saved conversation, keyed by id. Reads only the top of each file
+   * update_time and title of every saved conversation, keyed by id. Reads only the top of each file
    * (~15× faster than parsing ~300 MB of JSON) and falls back to a full parse if needed.
    */
   async loadSavedVersions() {
     const versions = /* @__PURE__ */ new Map();
-    let names;
-    try {
-      names = await fs5.readdir(this.conversationsDir);
-    } catch {
-      return versions;
-    }
     const buffer = Buffer.alloc(4096);
-    for (const name of names) {
-      if (!name.endsWith(".json") || name === "index.json") continue;
-      const id = name.slice(0, -".json".length);
-      versions.set(id, await this.readUpdateTimeFromHead(id, buffer));
+    for (const id of await this.savedIds()) {
+      const version = await this.readVersionFromHead(id, buffer);
+      if (version) versions.set(id, version);
     }
     return versions;
   }
-  async readUpdateTimeFromHead(id, buffer) {
+  async readVersionFromHead(id, buffer) {
     let head;
     try {
-      const handle = await fs5.open(this.jsonPath(id), "r");
+      const handle = await fs4.open(this.jsonPath(id), "r");
       try {
         const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
         head = buffer.toString("utf8", 0, bytesRead);
@@ -869,24 +921,93 @@ var StorageService = class {
     } catch {
       return null;
     }
-    const match = /^ {2}"update_time": (-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|null),?\r?$/m.exec(head);
-    if (match) return match[1] === "null" ? null : Number(match[1]);
-    return this.getExistingConversationUpdateTime(id);
+    const update = /^ {2}"update_time": (-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|null),?\r?$/m.exec(head);
+    const title = /^ {2}"title": (null|"(?:[^"\\]|\\.)*"),?\r?$/m.exec(head);
+    if (!update || !title) return this.getExistingConversationVersion(id);
+    return { updateTime: update[1] === "null" ? null : Number(update[1]), title: JSON.parse(title[1]) };
   }
 };
-async function writeAtomic(filePath, content) {
-  const tmp = `${filePath}.${process.pid}.tmp`;
-  await fs5.writeFile(tmp, content, "utf-8");
-  await fs5.rename(tmp, filePath);
+async function convertArchive(outputDir, options) {
+  const folders = [new StorageService(outputDir, { timeZone: options.timeZone })];
+  for (const entry of await fs4.readdir(path4.join(outputDir, "projects"), { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory()) folders.push(new StorageService(outputDir, { timeZone: options.timeZone, projectFolder: entry.name }));
+  }
+  const work = [];
+  for (const storage of folders) work.push({ storage, ids: await storage.savedIds() });
+  const total = work.reduce((sum, folder) => sum + folder.ids.length, 0);
+  const result = { converted: 0, unchanged: 0, errors: 0 };
+  let done = 0;
+  if (total > 0) options.onProgress?.(0, total);
+  for (const { storage, ids } of work) {
+    if (ids.length === 0) continue;
+    await storage.loadFileLinks();
+    for (const id of ids) {
+      if (options.signal?.aborted) throw abortError(options.signal);
+      try {
+        if (await storage.refreshMarkdown(id) === "written") result.converted += 1;
+        else result.unchanged += 1;
+      } catch {
+        result.errors += 1;
+      }
+      done += 1;
+      if (done % 250 === 0 || done === total) options.onProgress?.(done, total);
+    }
+  }
+  return result;
 }
-async function updateMetadata(outputDir, patch) {
-  const metadataPath = path5.join(outputDir, "metadata.json");
-  let metadata = {};
+async function stampTimes(filePath, times) {
+  const modified = times.updated ?? times.created;
+  if (modified === null) return;
+  const created = Math.min(times.created ?? modified, modified);
   try {
-    metadata = JSON.parse(await fs5.readFile(metadataPath, "utf-8"));
+    const stat = await fs4.stat(filePath);
+    const birthDone = process.platform !== "darwin" || stat.birthtimeMs <= created * 1e3 + 2;
+    if (birthDone && Math.abs(stat.mtimeMs - modified * 1e3) < 2) return;
+    if (!birthDone) await fs4.utimes(filePath, stat.atime, created);
+    await fs4.utimes(filePath, stat.atime, modified);
   } catch {
   }
-  await writeAtomic(metadataPath, JSON.stringify({ ...metadata, ...patch }, null, 2));
+}
+async function readTextIfExists(filePath) {
+  try {
+    return await fs4.readFile(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+async function writeAtomic(filePath, content) {
+  const tmp = `${filePath}.${process.pid}.tmp`;
+  try {
+    await fs4.writeFile(tmp, content, "utf-8");
+    await fs4.rename(tmp, filePath);
+  } catch (error) {
+    await fs4.rm(tmp, { force: true });
+    throw error;
+  }
+}
+async function removeStaleTempFiles(dir) {
+  let names;
+  try {
+    names = await fs4.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = /\.(?:json|md)\.(\d+)\.tmp$/.exec(name)?.[1];
+    if (pid !== void 0 && Number(pid) !== process.pid) await fs4.rm(path4.join(dir, name), { force: true });
+  }
+}
+async function readMetadata(outputDir) {
+  try {
+    const parsed = JSON.parse(await fs4.readFile(path4.join(outputDir, "metadata.json"), "utf-8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+async function updateMetadata(outputDir, patch) {
+  const metadata = await readMetadata(outputDir);
+  await writeAtomic(path4.join(outputDir, "metadata.json"), JSON.stringify({ ...metadata, ...patch }, null, 2));
 }
 
 // src/utils/format.ts
@@ -1078,9 +1199,18 @@ var BackupRun = class {
     }
     return versions.get(id) ?? null;
   }
+  /**
+   * Renaming a chat doesn't always change its update_time, so titles are compared too. A listed title that a
+   * fresh download already didn't match (the list and the conversation disagree) doesn't count.
+   */
+  renamed(id, saved, item) {
+    const listed = item.title;
+    if (typeof listed !== "string" || listed === "" || listed === saved.title) return false;
+    return !this.sync.knownTitleMismatch(id, listed);
+  }
   async save(storage, id, detail) {
     await storage.saveConversation(id, detail);
-    this.savedVersions.get(storage)?.set(id, detail.update_time ?? null);
+    this.savedVersions.get(storage)?.set(id, savedVersionOf(detail));
   }
   async copy(from, to, id) {
     const version = await to.copyConversationFrom(from, id);
@@ -1092,7 +1222,7 @@ var BackupRun = class {
     const id = item.id;
     const listed = toEpochSeconds(item.update_time);
     const saved = this.options.full ? null : await this.savedVersion(storage, id);
-    const upToDate = isUpToDate(saved, listed);
+    const upToDate = saved !== null && isUpToDate(saved.updateTime, listed) && !this.renamed(id, saved, item);
     const tracked = this.tracked.get(id);
     if (!tracked) {
       const entry = { item, updateTime: listed, status: "current", targets: [] };
@@ -1256,7 +1386,7 @@ var BackupRun = class {
       const name = project.gizmo.display.name;
       try {
         const items = await fetchProjectConversations(this.client, project.gizmo.id, { signal: this.listSignal });
-        const storage = new StorageService(this.mainStorage.outputDir, name);
+        const storage = this.mainStorage.forProject(name);
         await storage.initialize();
         await storage.loadFileLinks();
         await storage.saveIndex(items);
@@ -1320,6 +1450,7 @@ var BackupRun = class {
         this.result.downloaded += 1;
         consecutiveFailures = 0;
         this.sync.clearFailure(id);
+        this.sync.noteTitle(id, tracked.item.title, detail.title);
         await this.log(`Downloaded: ${id} - ${entry.title}`);
         this.events.onDownloaded?.(entry, this.attempted);
       } catch (error) {
@@ -1342,8 +1473,8 @@ var BackupRun = class {
 };
 
 // src/services/sync-state.ts
-import fs6 from "fs/promises";
-import path6 from "path";
+import fs5 from "fs/promises";
+import path5 from "path";
 var MAX_FAILED_RUNS = 3;
 var SyncStateStore = class _SyncStateStore {
   filePath;
@@ -1353,11 +1484,16 @@ var SyncStateStore = class _SyncStateStore {
     this.state = state;
   }
   static async load(outputDir) {
-    const filePath = path6.join(outputDir, ".sync-state.json");
+    const filePath = path5.join(outputDir, ".sync-state.json");
     let state = { version: 1, failures: {} };
     try {
-      const parsed = JSON.parse(await fs6.readFile(filePath, "utf-8"));
-      state = { version: 1, lastFullListingAt: parsed.lastFullListingAt, failures: parsed.failures ?? {} };
+      const parsed = JSON.parse(await fs5.readFile(filePath, "utf-8"));
+      state = {
+        version: 1,
+        lastFullListingAt: parsed.lastFullListingAt,
+        failures: parsed.failures ?? {},
+        titleMismatches: parsed.titleMismatches
+      };
     } catch {
     }
     return new _SyncStateStore(filePath, state);
@@ -1381,6 +1517,18 @@ var SyncStateStore = class _SyncStateStore {
   clearFailure(id) {
     delete this.state.failures[id];
   }
+  /** This listed title was already fetched once, and the conversation itself had another title. */
+  knownTitleMismatch(id, listedTitle) {
+    return this.state.titleMismatches?.[id] === listedTitle;
+  }
+  /** After a download: remembers a listed title the conversation didn't match, or forgets an old one. */
+  noteTitle(id, listedTitle, savedTitle) {
+    if (typeof listedTitle === "string" && listedTitle !== "" && listedTitle !== savedTitle) {
+      (this.state.titleMismatches ??= {})[id] = listedTitle;
+    } else if (this.state.titleMismatches && id in this.state.titleMismatches) {
+      delete this.state.titleMismatches[id];
+    }
+  }
   parkedCount() {
     return Object.values(this.state.failures).filter((r) => r.gone || r.count >= MAX_FAILED_RUNS).length;
   }
@@ -1390,8 +1538,8 @@ var SyncStateStore = class _SyncStateStore {
 };
 
 // src/cli/output-dir.ts
-import fs7 from "fs/promises";
-import path7 from "path";
+import fs6 from "fs/promises";
+import path6 from "path";
 import chalk from "chalk";
 
 // src/utils/prompt.ts
@@ -1443,7 +1591,7 @@ function promptHidden(question) {
 // src/cli/output-dir.ts
 async function looksLikeArchive(dir) {
   try {
-    await fs7.access(path7.join(dir, "conversations", "index.json"));
+    await fs6.access(path6.join(dir, "conversations", "index.json"));
     return true;
   } catch {
     return false;
@@ -1451,14 +1599,14 @@ async function looksLikeArchive(dir) {
 }
 async function chooseOutputDir(settings, flag) {
   if (flag || isOutputDirConfigured(settings)) return resolveOutputDir(settings, flag);
-  const local = path7.resolve("chatgpt-export");
+  const local = path6.resolve("chatgpt-export");
   const suggestion = await looksLikeArchive(local) ? local : defaultOutputDir();
   let chosen = suggestion;
   if (isInteractive()) {
     console.log(chalk.bold("\nWhere should the archive go?"));
     console.log(chalk.dim("  Each conversation is saved there as JSON and Markdown. Press Enter to accept the suggestion."));
     const answer = (await promptLine(`  Archive folder [${suggestion}]: `)).trim();
-    chosen = answer ? path7.resolve(expandHome(answer)) : suggestion;
+    chosen = answer ? path6.resolve(expandHome(answer)) : suggestion;
   }
   await saveSettings(settings, { [ENV.exportDir]: chosen });
   console.log(chalk.dim(`  Archive folder saved to ${settings.configPath} (edit ${ENV.exportDir} there, or pass -o).
@@ -1467,9 +1615,9 @@ async function chooseOutputDir(settings, flag) {
 }
 
 // src/utils/lock.ts
-import fs8 from "fs";
+import fs7 from "fs";
 import fsp2 from "fs/promises";
-import path8 from "path";
+import path7 from "path";
 var AlreadyRunningError = class extends Error {
   constructor(pid, startedAt) {
     super(`Another backup is already running (pid ${pid}${startedAt ? `, started ${startedAt}` : ""}).`);
@@ -1486,7 +1634,7 @@ function isAlive(pid) {
 }
 async function acquireLock(dir, name = "backup.lock") {
   await fsp2.mkdir(dir, { recursive: true });
-  const file = path8.join(dir, name);
+  const file = path7.join(dir, name);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const handle = await fsp2.open(file, "wx");
@@ -1497,7 +1645,7 @@ async function acquireLock(dir, name = "backup.lock") {
         if (released) return;
         released = true;
         try {
-          fs8.unlinkSync(file);
+          fs7.unlinkSync(file);
         } catch {
         }
       };
@@ -1525,7 +1673,7 @@ async function acquireLock(dir, name = "backup.lock") {
 }
 async function lockHolder(dir, name = "backup.lock") {
   try {
-    const holder = JSON.parse(await fsp2.readFile(path8.join(dir, name), "utf-8"));
+    const holder = JSON.parse(await fsp2.readFile(path7.join(dir, name), "utf-8"));
     return holder.pid && isAlive(holder.pid) ? { pid: holder.pid, startedAt: holder.startedAt } : null;
   } catch {
     return null;
@@ -1558,8 +1706,8 @@ function notify(title, message) {
 }
 
 // src/cli/reminders.ts
-import fs9 from "fs/promises";
-import path9 from "path";
+import fs8 from "fs/promises";
+import path8 from "path";
 
 // src/auth/tokens.ts
 var JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
@@ -1637,17 +1785,17 @@ function parseCredentialsText(text) {
 var EXPIRY_WARNING_MS = 2 * 24 * 36e5;
 var REPEAT_MS = 24 * 36e5;
 async function remindOncePerDay(stateDir, key, message, about = "", send = notify) {
-  const stampPath = path9.join(stateDir, `reminder-${key}.json`);
+  const stampPath = path8.join(stateDir, `reminder-${key}.json`);
   let stamp = {};
   try {
-    stamp = JSON.parse(await fs9.readFile(stampPath, "utf-8"));
+    stamp = JSON.parse(await fs8.readFile(stampPath, "utf-8"));
   } catch {
   }
   const due = stamp.about !== about || Date.now() - (stamp.notifiedAt ?? 0) >= REPEAT_MS;
   if (!due) return false;
   send("ChatGPT exporter", message);
-  await fs9.mkdir(stateDir, { recursive: true });
-  await fs9.writeFile(stampPath, JSON.stringify({ notifiedAt: Date.now(), about }));
+  await fs8.mkdir(stateDir, { recursive: true });
+  await fs8.writeFile(stampPath, JSON.stringify({ notifiedAt: Date.now(), about }));
   return true;
 }
 async function warnIfTokenExpiringSoon(settings, accessToken, send = notify) {
@@ -1874,7 +2022,7 @@ var PlainReporter = class {
 };
 
 // src/cli/runtime.ts
-import path11 from "path";
+import path10 from "path";
 
 // src/api/client.ts
 import crypto from "crypto";
@@ -2087,8 +2235,8 @@ var ChatGPTClient = class {
 };
 
 // src/api/scheduler.ts
-import fs10 from "fs/promises";
-import path10 from "path";
+import fs9 from "fs/promises";
+import path9 from "path";
 var KINDS = ["conversation", "list", "file"];
 var MAX_SLOWDOWN = 4;
 var MAX_SLEEP_SLICE_MS = 3e4;
@@ -2205,7 +2353,7 @@ var RequestScheduler = class _RequestScheduler {
     if (!this.config.statePath) return;
     let raw;
     try {
-      raw = await fs10.readFile(this.config.statePath, "utf-8");
+      raw = await fs9.readFile(this.config.statePath, "utf-8");
     } catch {
       return;
     }
@@ -2242,10 +2390,10 @@ var RequestScheduler = class _RequestScheduler {
       throttleStreaks: { ...this.throttleStreaks }
     };
     try {
-      await fs10.mkdir(path10.dirname(statePath), { recursive: true });
+      await fs9.mkdir(path9.dirname(statePath), { recursive: true });
       const tmp = `${statePath}.${process.pid}.tmp`;
-      await fs10.writeFile(tmp, JSON.stringify(state, null, 2));
-      await fs10.rename(tmp, statePath);
+      await fs9.writeFile(tmp, JSON.stringify(state, null, 2));
+      await fs9.rename(tmp, statePath);
     } catch {
     }
   }
@@ -2402,7 +2550,7 @@ function resolvePacing(settings, flags) {
   return { paceSeconds, burst: Math.max(1, Math.floor(burst)) };
 }
 function rateLimitStatePath(settings) {
-  return path11.join(settings.stateDir, "rate-limit.json");
+  return path10.join(settings.stateDir, "rate-limit.json");
 }
 function schedulerConfig(settings, pacing) {
   return {
@@ -2597,10 +2745,10 @@ function describePlan(plan) {
   parts.push(plan.toDownload > 0 ? chalk5.bold(`${formatCount(plan.toDownload)} to download`) : "nothing new to download");
   return parts.join(" \xB7 ");
 }
-function printSettings(runtime, output, options) {
+function printSettings(runtime, output, timeZone, options) {
   const { paceSeconds, burst } = runtime.pacing;
   const perHour = Math.round(3600 / paceSeconds);
-  console.log(chalk5.dim(`  Output:  ${output}`));
+  console.log(chalk5.dim(`  Output:  ${output} \xB7 dates in ${timeZone}`));
   console.log(
     chalk5.dim(
       `  Mode:    ${options.full ? "full (re-download everything)" : "incremental (new and changed chats, then older gaps)"}${options.archived ? " \xB7 archived chats included" : ""}${options.project ? ` \xB7 project "${options.project}" only` : ""}`
@@ -2644,9 +2792,24 @@ ${loginHint()}`);
 function summaryLine(result) {
   return `Backup ${result.stopReason ? "paused" : "finished"}: ${result.downloaded} downloaded, ${result.upToDate} up to date, ${result.copied} copied, ${result.failed} failed, ${result.remaining} remaining` + (result.stopReason ? ` (stopped: ${STOP_MESSAGES[result.stopReason]})` : "");
 }
+async function upgradeMarkdown(output, timeZone, storage, reporter, signal) {
+  const metadata = await readMetadata(output);
+  if (metadata.markdownFormat === MARKDOWN_FORMAT && metadata.markdownTimeZone === timeZone) return;
+  const result = await convertArchive(output, {
+    timeZone,
+    signal,
+    onProgress: (done, total) => reporter.spin(`Updating the Markdown files: ${formatCount(done)}/${formatCount(total)}`)
+  });
+  if (result.converted + result.unchanged + result.errors > 0) {
+    const summary = `Markdown files updated: ${formatCount(result.converted)} rewritten, ${formatCount(result.unchanged)} already current` + (result.errors > 0 ? `, ${formatCount(result.errors)} unreadable` : "");
+    reporter.spinDone(summary);
+    await storage.appendLog(summary);
+  }
+  await updateMetadata(output, { markdownFormat: MARKDOWN_FORMAT, markdownTimeZone: timeZone });
+}
 async function loadFailedFiles(output) {
   try {
-    const metadata = JSON.parse(await fs11.readFile(path12.join(output, "metadata.json"), "utf-8"));
+    const metadata = JSON.parse(await fs10.readFile(path11.join(output, "metadata.json"), "utf-8"));
     if (Array.isArray(metadata.failedFiles)) return new Set(metadata.failedFiles);
   } catch {
   }
@@ -2701,13 +2864,16 @@ async function backupCommand(options) {
   try {
     const settings = await loadSettings();
     const output = await chooseOutputDir(settings, options.output);
+    const timeZone = await ensureTimeZone(settings);
     lock = await acquireLock(settings.stateDir);
-    const storage = new StorageService(output);
+    const storage = new StorageService(output, { timeZone });
     await storage.initialize();
+    await removeStaleTempFiles(output);
     const log = async (message) => {
       await storage.appendLog(message);
       if (options.verbose) reporter.info(chalk5.dim(message));
     };
+    await upgradeMarkdown(output, timeZone, storage, reporter, controller.signal);
     reporter.spin("Checking your ChatGPT sign-in\u2026");
     const runtime = await createRuntime({
       settings,
@@ -2732,7 +2898,7 @@ async function backupCommand(options) {
         await storage.appendLog(`Warning: ${warning}`);
       }
     }
-    printSettings(runtime, output, options);
+    printSettings(runtime, output, timeZone, options);
     runtime.scheduler.onWait = (kind, info) => reporter.waiting(kind, info);
     const sync = await SyncStateStore.load(output);
     const capped = (queued) => Math.min(queued, options.maxDownloads ?? Number.POSITIVE_INFINITY);
@@ -2776,7 +2942,7 @@ async function backupCommand(options) {
         reporter.warn(`File downloads stopped: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (options.downloadFiles) await convertDirectory(output, path12.join(output, "files"));
+    if (options.downloadFiles) await convertArchive(output, { timeZone });
     await updateMetadata(output, {
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       mode: options.full ? "full" : "incremental",
@@ -2810,18 +2976,37 @@ async function backupCommand(options) {
 }
 
 // src/cli/commands/convert.ts
-import fs12 from "fs/promises";
-import path13 from "path";
 import chalk6 from "chalk";
 async function convertCommand(options) {
-  const settings = await loadSettings();
-  const output = resolveOutputDir(settings, options.output);
-  const filesDir = path13.join(output, "files");
-  const hasFiles = await fs12.stat(filesDir).then((s) => s.isDirectory(), () => false);
-  const result = await convertDirectory(output, hasFiles ? filesDir : void 0);
-  console.log(`Converted ${formatCount(result.converted)} conversations to Markdown in ${chalk6.cyan(output)}`);
-  if (result.errors > 0) console.log(chalk6.red(`  ${formatCount(result.errors)} couldn't be converted`));
-  return result.errors > 0 ? EXIT.error : EXIT.ok;
+  const reporter = createReporter();
+  let lock;
+  try {
+    const settings = await loadSettings();
+    const output = resolveOutputDir(settings, options.output);
+    const timeZone = await ensureTimeZone(settings);
+    lock = await acquireLock(settings.stateDir);
+    const result = await convertArchive(output, {
+      timeZone,
+      onProgress: (done, total) => reporter.spin(`Converting: ${formatCount(done)}/${formatCount(total)}`)
+    });
+    reporter.finish();
+    const converted = result.converted + result.unchanged;
+    if (converted + result.errors === 0) {
+      console.log(`No saved conversations in ${chalk6.cyan(output)}`);
+      return EXIT.ok;
+    }
+    await updateMetadata(output, { markdownFormat: MARKDOWN_FORMAT, markdownTimeZone: timeZone });
+    console.log(
+      `Converted ${plural(converted, "conversation")} in ${chalk6.cyan(output)} (dates in ${timeZone}): ${formatCount(result.converted)} Markdown files rewritten, ${formatCount(result.unchanged)} already current`
+    );
+    if (result.errors > 0) console.log(chalk6.red(`  ${formatCount(result.errors)} couldn't be converted`));
+    return result.errors > 0 ? EXIT.error : EXIT.ok;
+  } catch (error) {
+    reporter.finish();
+    return handleCommandError(error);
+  } finally {
+    await lock?.release();
+  }
 }
 
 // src/cli/commands/list.ts
@@ -2937,19 +3122,19 @@ async function projectsCommand(options) {
 }
 
 // src/cli/commands/status.ts
-import fs13 from "fs/promises";
-import path14 from "path";
+import fs11 from "fs/promises";
+import path12 from "path";
 import chalk10 from "chalk";
 async function readJson(file) {
   try {
-    return JSON.parse(await fs13.readFile(file, "utf-8"));
+    return JSON.parse(await fs11.readFile(file, "utf-8"));
   } catch {
     return null;
   }
 }
 async function downloadedIds(dir) {
   try {
-    const files = await fs13.readdir(dir);
+    const files = await fs11.readdir(dir);
     return new Set(files.filter((f) => f.endsWith(".json") && f !== "index.json").map((f) => f.slice(0, -5)));
   } catch {
     return /* @__PURE__ */ new Set();
@@ -2962,7 +3147,7 @@ async function statusCommand(options) {
   const pacing = resolvePacing(settings, {});
   const now = Date.now();
   console.log(chalk10.bold("ChatGPT exporter status"));
-  const configExists = await fs13.stat(settings.configPath).then(() => true, () => false);
+  const configExists = await fs11.stat(settings.configPath).then(() => true, () => false);
   row("Settings", `${settings.configPath}${configExists ? "" : chalk10.dim(" (not created yet)")}`);
   const { chosen, expired } = pickToken(tokenCandidates(settings), now);
   if (chosen) {
@@ -2979,8 +3164,14 @@ async function statusCommand(options) {
   const accountId = getSetting(settings, ENV.accountId);
   if (accountId) row("Workspace", accountId);
   row("Output", `${output}${options.output || isOutputDirConfigured(settings) ? "" : chalk10.dim(" (default; the first backup asks where to keep the archive)")}`);
-  const conversationsDir = path14.join(output, "conversations");
-  const index = await readJson(path14.join(conversationsDir, "index.json"));
+  try {
+    const pinned = getSetting(settings, ENV.timeZone) !== void 0;
+    row("Time zone", `${resolveTimeZone(settings)}${pinned ? "" : chalk10.dim(" (this computer's; the next backup saves it)")}`);
+  } catch (error) {
+    row("Time zone", chalk10.yellow(errorMessage(error)));
+  }
+  const conversationsDir = path12.join(output, "conversations");
+  const index = await readJson(path12.join(conversationsDir, "index.json"));
   let missingCount = 0;
   if (!Array.isArray(index)) {
     row("Archive", "no backup here yet");
@@ -2991,7 +3182,7 @@ async function statusCommand(options) {
     const archived = index.filter((c) => c.is_archived).length;
     const done = index.length - missing.length;
     const pct = index.length > 0 ? Math.floor(done / index.length * 100) : 100;
-    const listedAt = (await fs13.stat(path14.join(conversationsDir, "index.json"))).mtimeMs;
+    const listedAt = (await fs11.stat(path12.join(conversationsDir, "index.json"))).mtimeMs;
     row(
       "Archive",
       `${formatCount(done)} of ${formatCount(index.length)} conversations downloaded (${pct}%)` + (archived > 0 ? `, incl. ${formatCount(archived)} archived` : "") + chalk10.dim(` \xB7 as listed ${formatDateTime(listedAt)}`)
@@ -3002,14 +3193,14 @@ async function statusCommand(options) {
       row("To do", `${formatCount(missing.length)} not downloaded yet${range}`);
     }
   }
-  const projectsDir = path14.join(output, "projects");
-  const projectNames = await fs13.readdir(projectsDir).catch(() => []);
+  const projectsDir = path12.join(output, "projects");
+  const projectNames = await fs11.readdir(projectsDir).catch(() => []);
   let projectTotal = 0;
   let projectDone = 0;
   let projectCount = 0;
   for (const name of projectNames) {
-    const dir = path14.join(projectsDir, name, "conversations");
-    const projectIndex = await readJson(path14.join(dir, "index.json"));
+    const dir = path12.join(projectsDir, name, "conversations");
+    const projectIndex = await readJson(path12.join(dir, "index.json"));
     if (!Array.isArray(projectIndex)) continue;
     const have = await downloadedIds(dir);
     projectCount += 1;
@@ -3036,7 +3227,7 @@ async function statusCommand(options) {
   const parked = sync.parkedCount();
   if (parked > 0) row("Parked", `${plural(parked, "conversation")} skipped after repeated failures (backup --retry-failed)`);
   if (sync.state.lastFullListingAt) row("Full listing", formatDateTime(Date.parse(sync.state.lastFullListingAt)));
-  const meta = await readJson(path14.join(output, "metadata.json"));
+  const meta = await readJson(path12.join(output, "metadata.json"));
   if (meta && typeof meta.timestamp === "string") {
     const forkFormat = typeof meta.mode === "string";
     row(
@@ -3050,7 +3241,7 @@ async function statusCommand(options) {
 }
 
 // src/cli/index.ts
-var VERSION = "2.0.0-fork.5";
+var VERSION = "2.0.0-fork.6";
 function positiveNumber(flag) {
   return (value) => {
     const n = Number(value);
@@ -3121,7 +3312,7 @@ function createCli() {
   program.command("projects").description("List all projects").option("--json", "output as JSON", false).option("-t, --token <token>", "use this access token instead of the saved one").option("-v, --verbose", "verbose errors", false).action(async (opts) => {
     process.exitCode = await projectsCommand({ token: opts.token, verbose: opts.verbose, json: opts.json });
   });
-  program.command("convert").description("Regenerate every Markdown file from the saved JSON (no network requests)").option("-o, --output <dir>", "output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)").action(async (opts) => {
+  program.command("convert").description("Regenerate the Markdown files and restore the files' dates from the saved JSON (no network requests)").option("-o, --output <dir>", "output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)").action(async (opts) => {
     process.exitCode = await convertCommand({ output: opts.output });
   });
   return program;

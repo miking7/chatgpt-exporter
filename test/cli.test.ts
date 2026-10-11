@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MARKDOWN_FORMAT } from '../src/services/storage-service.js';
 import { fakeJwt, makeConversations, startMockServer } from './helpers/mock-chatgpt.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -14,6 +15,7 @@ function runCli(args: string[], env: Record<string, string>): Promise<{ code: nu
   delete childEnv.CHATGPT_TOKEN;
   delete childEnv.CHATGPT_ACCOUNT_ID;
   delete childEnv.CHATGPT_EXPORT_DIR;
+  delete childEnv.CHATGPT_TIMEZONE;
   return new Promise((resolve) => {
     const child = spawn(process.execPath, ['--import', 'tsx', path.join(root, 'src/index.ts'), ...args], {
       cwd: root,
@@ -87,7 +89,13 @@ test('CLI: backup reads token and output folder from config.env, then status sum
     const metadata = JSON.parse(await fs.readFile(path.join(out, 'metadata.json'), 'utf-8'));
     assert.equal(metadata.mode, 'incremental');
     assert.equal(metadata.successfulDownloads, 4);
+    assert.equal(metadata.markdownFormat, MARKDOWN_FORMAT);
     assert.match(await fs.readFile(path.join(out, 'backup.log'), 'utf-8'), /Backup finished: 4 downloaded/);
+    assert.match(await fs.readFile(path.join(home, 'config.env'), 'utf-8'), /^CHATGPT_TIMEZONE=\S+$/m, 'time zone pinned on the first run');
+
+    const convert = await runCli(['convert'], env);
+    assert.equal(convert.code, 0, convert.stderr);
+    assert.match(convert.stdout, /Converted 4 conversations .*: 0 Markdown files rewritten, 4 already current/);
 
     const again = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
     assert.equal(again.code, 0);
@@ -97,7 +105,21 @@ test('CLI: backup reads token and output folder from config.env, then status sum
     assert.equal(status.code, 0);
     assert.match(status.stdout, /4 of 4 conversations downloaded \(100%\)/);
     assert.match(status.stdout, /me@example\.com/);
+    assert.match(status.stdout, /Time zone +\S+\s*$/m);
     assert.equal(mock.count((r) => r.path.startsWith('/backend-api/conversation/')), 4, 'status made no requests');
+
+    // As if an earlier version made the archive: old Markdown, no format recorded, a temp file from a killed run.
+    const [firstMd] = (await fs.readdir(path.join(out, 'conversations'))).filter((f) => f.endsWith('.md'));
+    await fs.writeFile(path.join(out, 'conversations', firstMd), '# Old format\n');
+    const { markdownFormat: _, ...older } = JSON.parse(await fs.readFile(path.join(out, 'metadata.json'), 'utf-8'));
+    await fs.writeFile(path.join(out, 'metadata.json'), JSON.stringify(older));
+    await fs.writeFile(path.join(out, '.sync-state.json.99999999.tmp'), '');
+    const upgraded = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
+    assert.equal(upgraded.code, 0, upgraded.stderr);
+    assert.match(upgraded.stderr, /Markdown files updated: 1 rewritten, 3 already current/);
+    assert.match(await fs.readFile(path.join(out, 'conversations', firstMd), 'utf-8'), /^id: /m);
+    await assert.rejects(fs.access(path.join(out, '.sync-state.json.99999999.tmp')), 'temp file from a killed run removed');
+    assert.equal(mock.count((r) => r.path.startsWith('/backend-api/conversation/')), 4, 'nothing re-downloaded');
   } finally {
     await mock.close();
     await fs.rm(home, { recursive: true, force: true });
@@ -111,6 +133,19 @@ test('CLI: an expired saved token is reported instead of used', async () => {
     const result = await runCli(['backup', '--no-keep-awake', '-o', path.join(home, 'out')], { CHATGPT_EXPORTER_HOME: home });
     assert.equal(result.code, 2);
     assert.match(result.stderr, /expired on/);
+  } finally {
+    await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test('CLI: convert refuses to run alongside a backup', async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'cli-home-'));
+  try {
+    // This test process stands in for a running backup.
+    await fs.writeFile(path.join(home, 'backup.lock'), JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    const result = await runCli(['convert', '-o', path.join(home, 'out')], { CHATGPT_EXPORTER_HOME: home });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Another backup is already running/);
   } finally {
     await fs.rm(home, { recursive: true, force: true });
   }

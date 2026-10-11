@@ -1,7 +1,5 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import type { ConversationDetail } from '../api/types.js';
-import { buildFileMap } from './file-service.js';
+import { formatIsoLocal, localDate } from '../utils/time.js';
 
 interface MappingNode {
   id: string;
@@ -77,11 +75,6 @@ function getLinearThread(mapping: Record<string, MappingNode>, currentNode?: str
   return thread;
 }
 
-function formatDate(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
-  return date.toISOString().split('T')[0];
-}
-
 function formatRole(role: string): string {
   switch (role) {
     case 'user': return 'User';
@@ -90,16 +83,68 @@ function formatRole(role: string): string {
   }
 }
 
-export function convertConversation(detail: ConversationDetail, fileMap?: Map<string, string>): string {
-  const lines: string[] = [];
+export interface ConversationTimes {
+  /** When the chat started (epoch seconds). */
+  created: number | null;
+  /** When ChatGPT last changed it: the version the backup keys on. */
+  updated: number | null;
+}
+
+const isTimestamp = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+/** The chat's own dates, falling back to its messages' times when ChatGPT left one out. */
+export function conversationTimes(detail: ConversationDetail): ConversationTimes {
+  const ownCreated = isTimestamp(detail.create_time) ? detail.create_time : null;
+  const ownUpdated = isTimestamp(detail.update_time) ? detail.update_time : null;
+  if (ownCreated !== null && ownUpdated !== null) return { created: ownCreated, updated: ownUpdated };
+  let first: number | null = null;
+  let last: number | null = null;
+  for (const node of Object.values(detail.mapping ?? {})) {
+    const time = node.message?.create_time;
+    if (!isTimestamp(time)) continue;
+    if (first === null || time < first) first = time;
+    if (last === null || time > last) last = time;
+  }
+  const created = ownCreated ?? first ?? ownUpdated;
+  return { created, updated: ownUpdated ?? last ?? created };
+}
+
+export interface MarkdownOptions {
+  /** The conversation id (not every saved JSON carries it). */
+  id: string;
+  /** IANA zone the dates are shown in. */
+  timeZone: string;
+  /** fileId → path of the downloaded file, relative to the Markdown file. */
+  fileMap?: Map<string, string>;
+}
+
+/** YAML front matter: lets Obsidian, editors and scripts sort and find chats by their real dates. */
+function frontMatter(detail: ConversationDetail, options: MarkdownOptions, times: ConversationTimes): string[] {
+  const lines = [
+    '---',
+    `id: ${options.id}`,
+    `url: https://chatgpt.com/c/${options.id}`,
+    // A JSON string is also a valid YAML double-quoted string, whatever the title contains.
+    `title: ${JSON.stringify(detail.title ?? 'Untitled')}`,
+  ];
+  if (times.created !== null) lines.push(`created: ${formatIsoLocal(times.created, options.timeZone)}`);
+  if (times.updated !== null) lines.push(`updated: ${formatIsoLocal(times.updated, options.timeZone)}`);
+  lines.push('---', '');
+  return lines;
+}
+
+export function convertConversation(detail: ConversationDetail, options: MarkdownOptions): string {
+  const { fileMap } = options;
+  const times = conversationTimes(detail);
+  const lines = frontMatter(detail, options, times);
 
   // Title
   const title = detail.title ?? 'Untitled';
   lines.push(`# ${title}`);
 
-  // Date
-  if (detail.create_time) {
-    lines.push(`*${formatDate(detail.create_time)}*`);
+  // Date, in the user's time zone
+  if (times.created !== null) {
+    lines.push(`*${localDate(times.created, options.timeZone)}*`);
   }
 
   const thread = getLinearThread(
@@ -153,82 +198,4 @@ export function convertConversation(detail: ConversationDetail, fileMap?: Map<st
 
   lines.push('');
   return lines.join('\n');
-}
-
-async function findJsonFiles(dir: string): Promise<string[]> {
-  const files: string[] = [];
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isFile() && entry.name.endsWith('.json') && entry.name !== 'index.json') {
-        files.push(fullPath);
-      }
-    }
-  } catch {
-    // Directory doesn't exist, return empty
-  }
-  return files;
-}
-
-async function collectAllJsonFiles(inputDir: string): Promise<string[]> {
-  const files: string[] = [];
-
-  // Main conversations
-  const mainDir = path.join(inputDir, 'conversations');
-  files.push(...await findJsonFiles(mainDir));
-
-  // Project conversations
-  const projectsDir = path.join(inputDir, 'projects');
-  try {
-    const projectEntries = await fs.readdir(projectsDir, { withFileTypes: true });
-    for (const entry of projectEntries) {
-      if (entry.isDirectory()) {
-        const projectConvDir = path.join(projectsDir, entry.name, 'conversations');
-        files.push(...await findJsonFiles(projectConvDir));
-      }
-    }
-  } catch {
-    // No projects directory
-  }
-
-  return files;
-}
-
-export async function convertDirectory(inputDir: string, filesDir?: string): Promise<{ converted: number; errors: number }> {
-  const jsonFiles = await collectAllJsonFiles(inputDir);
-
-  // Build a global fileMap from the files/ directory (fileId → files/{fileId}/{filename})
-  const globalFileMap = filesDir ? await buildFileMap(filesDir) : null;
-
-  let converted = 0;
-  let errors = 0;
-
-  for (const jsonPath of jsonFiles) {
-    try {
-      const raw = await fs.readFile(jsonPath, 'utf-8');
-      const detail = JSON.parse(raw) as ConversationDetail;
-
-      // Compute relative paths from this markdown file's directory to each file
-      let fileMap: Map<string, string> | undefined;
-      if (globalFileMap && globalFileMap.size > 0) {
-        fileMap = new Map();
-        const mdDir = path.dirname(jsonPath);
-        for (const [fileId, filePath] of globalFileMap) {
-          const absFilePath = path.join(inputDir, filePath);
-          const relativePath = path.relative(mdDir, absFilePath);
-          fileMap.set(fileId, relativePath);
-        }
-      }
-
-      const markdown = convertConversation(detail, fileMap);
-      const mdPath = jsonPath.replace(/\.json$/, '.md');
-      await fs.writeFile(mdPath, markdown, 'utf-8');
-      converted++;
-    } catch {
-      errors++;
-    }
-  }
-
-  return { converted, errors };
 }

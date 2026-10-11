@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.0.0-fork.6
+
+### Added
+
+- Saved files carry the chat's own dates: Date Modified is when the chat last changed and, on macOS, Date Created is when it started. Both used to be the download time.
+- Markdown files start with YAML front matter: `id`, `url` (a link back to the chat), `title`, `created` and `updated`.
+- `CHATGPT_TIMEZONE`: dates in the Markdown are in your time zone, saved on the first run so they stay put when you travel. `status` shows it.
+- A renamed chat is downloaded again even when ChatGPT doesn't change its update time (the saved title is compared with the listed one). A title that the list and the chat itself disagree on is only fetched once.
+
+### Changed
+
+- The date under each Markdown title is the local date. It was the UTC date: the day before, for chats started in the morning in Australia.
+- The first backup after updating regenerates the Markdown from the saved JSON (a few seconds, no downloads), and so does changing `CHATGPT_TIMEZONE`. `convert` and `--download-files` now rewrite only files whose content changed.
+- `convert` takes the backup lock, so it can't collide with a scheduled backup.
+- The Markdown is written before the JSON, so a save cut short in between is redone on the next run.
+
+### Fixed
+
+- A failed write no longer leaves a `.tmp` file behind, and ones left by a killed run are removed at the start of the next backup.
+
 ## 2.0.0-fork.5
 
 ### Added

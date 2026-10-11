@@ -3,11 +3,12 @@ import path from 'node:path';
 import chalk from 'chalk';
 import type { ConversationItem } from '../../api/types.js';
 import { getTokenInfo, pickToken, tokenExpiresAt } from '../../auth/tokens.js';
-import { ENV, getSetting, isOutputDirConfigured, loadSettings, resolveOutputDir } from '../../config/settings.js';
+import { ENV, getSetting, isOutputDirConfigured, loadSettings, resolveOutputDir, resolveTimeZone } from '../../config/settings.js';
 import { SyncStateStore } from '../../services/sync-state.js';
 import { lockHolder } from '../../utils/lock.js';
 import { toEpochSeconds } from '../../utils/time.js';
 import {
+  errorMessage,
   formatClock,
   formatCount,
   formatDateTime,
@@ -66,6 +67,12 @@ export async function statusCommand(options: { output?: string }): Promise<numbe
   if (accountId) row('Workspace', accountId);
 
   row('Output', `${output}${options.output || isOutputDirConfigured(settings) ? '' : chalk.dim(' (default; the first backup asks where to keep the archive)')}`);
+  try {
+    const pinned = getSetting(settings, ENV.timeZone) !== undefined;
+    row('Time zone', `${resolveTimeZone(settings)}${pinned ? '' : chalk.dim(" (this computer's; the next backup saves it)")}`);
+  } catch (error) {
+    row('Time zone', chalk.yellow(errorMessage(error)));
+  }
   const conversationsDir = path.join(output, 'conversations');
   const index = await readJson<ConversationItem[]>(path.join(conversationsDir, 'index.json'));
   let missingCount = 0;

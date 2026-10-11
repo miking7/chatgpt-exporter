@@ -13,6 +13,8 @@ export const ENV = {
   exportDir: 'CHATGPT_EXPORT_DIR',
   pace: 'CHATGPT_PACE_SECONDS',
   burst: 'CHATGPT_BURST',
+  /** IANA time zone for dates in the Markdown and its file names; saved on the first run. */
+  timeZone: 'CHATGPT_TIMEZONE',
   /** Overrides the config folder (e.g. one folder per workspace). */
   home: 'CHATGPT_EXPORTER_HOME',
 } as const;
@@ -27,6 +29,7 @@ const CONFIG_HEADER = `# chatgpt-exporter settings (KEY=VALUE, the same format a
 # CHATGPT_EXPORT_DIR     folder the archive is kept in
 # CHATGPT_PACE_SECONDS   average seconds between conversation downloads (default ${DEFAULT_PACE_SECONDS})
 # CHATGPT_BURST          downloads allowed back-to-back after a quiet period (default ${DEFAULT_BURST})
+# CHATGPT_TIMEZONE       time zone for dates in the archive (set to this computer's zone on the first run)
 `;
 
 export interface Settings {
@@ -88,6 +91,28 @@ export function isOutputDirConfigured(settings: Settings): boolean {
 /** `-o` flag, else CHATGPT_EXPORT_DIR, else the default folder. */
 export function resolveOutputDir(settings: Settings, flag?: string): string {
   return path.resolve(expandHome(flag ?? getSetting(settings, ENV.exportDir) ?? defaultOutputDir()));
+}
+
+/** The time zone dates in the archive are shown in: CHATGPT_TIMEZONE, else this computer's zone. */
+export function resolveTimeZone(settings: Settings): string {
+  const configured = getSetting(settings, ENV.timeZone);
+  if (configured === undefined) return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: configured });
+  } catch {
+    throw new Error(`${ENV.timeZone} must be a time zone such as Australia/Melbourne (got "${configured}")`);
+  }
+  return configured;
+}
+
+/**
+ * resolveTimeZone, saving this computer's zone the first time: dates in file names then stay put
+ * (and files aren't renamed) if the computer's zone changes, e.g. while travelling.
+ */
+export async function ensureTimeZone(settings: Settings): Promise<string> {
+  const zone = resolveTimeZone(settings);
+  if (getSetting(settings, ENV.timeZone) === undefined) await saveSettings(settings, { [ENV.timeZone]: zone });
+  return zone;
 }
 
 export async function saveSettings(settings: Settings, updates: Record<string, string | undefined>): Promise<void> {

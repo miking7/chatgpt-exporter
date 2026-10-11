@@ -48,3 +48,39 @@ export function toEpochSeconds(value: string | number | null | undefined): numbe
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms / 1000;
 }
+
+const zoneFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zoneParts(epochSeconds: number, timeZone: string): Record<string, string> {
+  let formatter = zoneFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'longOffset',
+    });
+    zoneFormatters.set(timeZone, formatter);
+  }
+  const parts: Record<string, string> = {};
+  for (const part of formatter.formatToParts(new Date(epochSeconds * 1000))) parts[part.type] = part.value;
+  return parts;
+}
+
+/** "2026-10-11": the calendar date in an IANA time zone. */
+export function localDate(epochSeconds: number, timeZone: string): string {
+  const p = zoneParts(epochSeconds, timeZone);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+/** "2026-10-11T09:14:05+11:00": ISO 8601 with the zone's offset at that moment. */
+export function formatIsoLocal(epochSeconds: number, timeZone: string): string {
+  const p = zoneParts(epochSeconds, timeZone);
+  const offset = p.timeZoneName === 'GMT' ? '+00:00' : p.timeZoneName.replace('GMT', '');
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}${offset}`;
+}

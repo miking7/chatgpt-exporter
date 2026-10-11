@@ -4,10 +4,16 @@ import chalk from 'chalk';
 import type { ChatGPTClient } from '../../api/client.js';
 import { BackupService, type BackupPlan, type BackupResult, type StopReason } from '../../services/backup-service.js';
 import { downloadFiles, scanAllConversations } from '../../services/file-service.js';
-import { convertDirectory } from '../../services/markdown-service.js';
-import { StorageService, updateMetadata } from '../../services/storage-service.js';
+import {
+  MARKDOWN_FORMAT,
+  StorageService,
+  convertArchive,
+  readMetadata,
+  removeStaleTempFiles,
+  updateMetadata,
+} from '../../services/storage-service.js';
 import { SyncStateStore } from '../../services/sync-state.js';
-import { loadSettings } from '../../config/settings.js';
+import { ensureTimeZone, loadSettings } from '../../config/settings.js';
 import { chooseOutputDir } from '../output-dir.js';
 import { acquireLock, type Lock } from '../../utils/lock.js';
 import { keepAwake } from '../../utils/system.js';
@@ -71,10 +77,10 @@ function describePlan(plan: BackupPlan): string {
   return parts.join(' · ');
 }
 
-function printSettings(runtime: Runtime, output: string, options: BackupCommandOptions): void {
+function printSettings(runtime: Runtime, output: string, timeZone: string, options: BackupCommandOptions): void {
   const { paceSeconds, burst } = runtime.pacing;
   const perHour = Math.round(3600 / paceSeconds);
-  console.log(chalk.dim(`  Output:  ${output}`));
+  console.log(chalk.dim(`  Output:  ${output} · dates in ${timeZone}`));
   console.log(
     chalk.dim(
       `  Mode:    ${options.full ? 'full (re-download everything)' : 'incremental (new and changed chats, then older gaps)'}` +
@@ -124,6 +130,28 @@ function summaryLine(result: BackupResult): string {
     `${result.copied} copied, ${result.failed} failed, ${result.remaining} remaining` +
     (result.stopReason ? ` (stopped: ${STOP_MESSAGES[result.stopReason]})` : '')
   );
+}
+
+/**
+ * Regenerates the Markdown from the saved JSON once after an update changes its format, or when the time zone
+ * changes. Local only, and only files whose content changed are rewritten.
+ */
+async function upgradeMarkdown(output: string, timeZone: string, storage: StorageService, reporter: Reporter, signal: AbortSignal): Promise<void> {
+  const metadata = await readMetadata(output);
+  if (metadata.markdownFormat === MARKDOWN_FORMAT && metadata.markdownTimeZone === timeZone) return;
+  const result = await convertArchive(output, {
+    timeZone,
+    signal,
+    onProgress: (done, total) => reporter.spin(`Updating the Markdown files: ${formatCount(done)}/${formatCount(total)}`),
+  });
+  if (result.converted + result.unchanged + result.errors > 0) {
+    const summary =
+      `Markdown files updated: ${formatCount(result.converted)} rewritten, ${formatCount(result.unchanged)} already current` +
+      (result.errors > 0 ? `, ${formatCount(result.errors)} unreadable` : '');
+    reporter.spinDone(summary);
+    await storage.appendLog(summary);
+  }
+  await updateMetadata(output, { markdownFormat: MARKDOWN_FORMAT, markdownTimeZone: timeZone });
 }
 
 async function loadFailedFiles(output: string): Promise<Set<string>> {
@@ -194,14 +222,18 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
   try {
     const settings = await loadSettings();
     const output = await chooseOutputDir(settings, options.output);
+    const timeZone = await ensureTimeZone(settings);
     lock = await acquireLock(settings.stateDir);
 
-    const storage = new StorageService(output);
+    const storage = new StorageService(output, { timeZone });
     await storage.initialize();
+    await removeStaleTempFiles(output);
     const log = async (message: string) => {
       await storage.appendLog(message);
       if (options.verbose) reporter.info(chalk.dim(message));
     };
+    // Before signing in: it's local, so it happens even when the token has expired.
+    await upgradeMarkdown(output, timeZone, storage, reporter, controller.signal);
 
     reporter.spin('Checking your ChatGPT sign-in…');
     const runtime = await createRuntime({
@@ -229,7 +261,7 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
         await storage.appendLog(`Warning: ${warning}`);
       }
     }
-    printSettings(runtime, output, options);
+    printSettings(runtime, output, timeZone, options);
 
     runtime.scheduler.onWait = (kind, info) => reporter.waiting(kind, info);
     const sync = await SyncStateStore.load(output);
@@ -278,7 +310,8 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
         reporter.warn(`File downloads stopped: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (options.downloadFiles) await convertDirectory(output, path.join(output, 'files'));
+    // Links to files downloaded after their conversation was saved.
+    if (options.downloadFiles) await convertArchive(output, { timeZone });
 
     await updateMetadata(output, {
       timestamp: new Date().toISOString(),

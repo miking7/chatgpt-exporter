@@ -12,6 +12,8 @@ export interface MockConversation {
   gone?: boolean;
   /** The detail response is missing `mapping` (as if ChatGPT changed its format). */
   malformed?: boolean;
+  /** The conversation itself has another title than the list shows. */
+  detailTitle?: string;
 }
 
 export interface MockOptions {
@@ -48,7 +50,7 @@ const iso = (seconds: number) => new Date(seconds * 1000).toISOString();
 
 function detailFor(c: MockConversation) {
   return {
-    title: c.title,
+    title: c.detailTitle ?? c.title,
     create_time: c.updateTime - 60,
     update_time: c.updateTime,
     conversation_id: c.id,
