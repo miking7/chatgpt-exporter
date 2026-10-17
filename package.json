@@ -1,6 +1,6 @@
 {
   "name": "chatgpt-exporter",
-  "version": "2.0.0-fork.7",
+  "version": "2.0.0-fork.8",
   "private": true,
   "description": "CLI tool to export ChatGPT conversations (fork: saved login, incremental by default, paced under ChatGPT's limits)",
   "license": "MIT",

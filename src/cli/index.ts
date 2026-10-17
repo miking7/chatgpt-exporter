@@ -2,13 +2,14 @@ import { Command, InvalidArgumentError, Option } from 'commander';
 import { DEFAULT_BURST, DEFAULT_PACE_SECONDS } from '../config/settings.js';
 import { backupCommand } from './commands/backup.js';
 import { convertCommand } from './commands/convert.js';
+import { digestCommand } from './commands/digest.js';
 import { listCommand } from './commands/list.js';
 import { loginCommand, logoutCommand } from './commands/login.js';
 import { projectsCommand } from './commands/projects.js';
 import { statusCommand } from './commands/status.js';
 import { CLI_NAME } from './runtime.js';
 
-export const VERSION = '2.0.0-fork.7';
+export const VERSION = '2.0.0-fork.8';
 
 function positiveNumber(flag: string) {
   return (value: string): number => {
@@ -66,6 +67,7 @@ export function createCli(): Command {
     .option('--download-files', 'also download file attachments and images', false)
     .option('--project <name-or-id>', 'only back up one project')
     .option('--no-keep-awake', "let the Mac sleep during the run (it's kept awake with caffeinate by default)")
+    .option('--no-digest', 'skip rebuilding digest/ at the end')
     .option('-t, --token <token>', 'use this access token instead of the saved one')
     .option('-v, --verbose', 'also print throttling and retry details', false)
     .addOption(new Option('--incremental', 'no effect: incremental is now the default').hideHelp())
@@ -84,6 +86,7 @@ export function createCli(): Command {
         downloadFiles: opts.downloadFiles,
         project: opts.project,
         keepAwake: opts.keepAwake,
+        digest: opts.digest,
         verbose: opts.verbose,
       });
     });
@@ -145,6 +148,17 @@ export function createCli(): Command {
     .option('-o, --output <dir>', 'output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)')
     .action(async (opts) => {
       process.exitCode = await convertCommand({ output: opts.output });
+    });
+
+  program
+    .command('digest')
+    .description(
+      'Rebuild digest/: an index of every chat by month, with the messages you typed and a searchable index.html, ' +
+        'from the saved Markdown (no network requests)'
+    )
+    .option('-o, --output <dir>', 'output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)')
+    .action(async (opts) => {
+      process.exitCode = await digestCommand({ output: opts.output });
     });
 
   return program;

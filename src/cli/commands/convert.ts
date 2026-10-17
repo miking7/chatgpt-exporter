@@ -1,12 +1,14 @@
 import chalk from 'chalk';
 import { ensureTimeZone, loadSettings, resolveOutputDir } from '../../config/settings.js';
+import { buildDigest } from '../../services/digest-service.js';
 import { MARKDOWN_FORMAT, convertArchive, updateMetadata } from '../../services/storage-service.js';
 import { acquireLock, type Lock } from '../../utils/lock.js';
 import { formatCount, plural } from '../../utils/format.js';
 import { createReporter } from '../reporter.js';
 import { EXIT, handleCommandError } from '../errors.js';
+import { digestLine } from './digest.js';
 
-/** Regenerates every .md from its .json and restores the files' dates (no network). */
+/** Regenerates every .md from its .json and restores the files' dates, then the digest (no network). */
 export async function convertCommand(options: { output?: string }): Promise<number> {
   const reporter = createReporter();
   let lock: Lock | undefined;
@@ -33,7 +35,11 @@ export async function convertCommand(options: { output?: string }): Promise<numb
         `${formatCount(result.converted)} Markdown files rewritten, ${formatCount(result.unchanged)} already current`
     );
     if (result.errors > 0) console.log(chalk.red(`  ${formatCount(result.errors)} couldn't be converted`));
-    return result.errors > 0 ? EXIT.error : EXIT.ok;
+
+    const digest = await buildDigest(output);
+    console.log(digestLine(digest));
+    for (const failure of digest.failures) console.error(chalk.red(`  Couldn't parse ${failure}`));
+    return result.errors > 0 || digest.failures.length > 0 ? EXIT.error : EXIT.ok;
   } catch (error) {
     reporter.finish();
     return handleCommandError(error);

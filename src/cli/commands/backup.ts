@@ -3,6 +3,7 @@ import path from 'node:path';
 import chalk from 'chalk';
 import type { ChatGPTClient } from '../../api/client.js';
 import { BackupService, type BackupPlan, type BackupResult, type StopReason } from '../../services/backup-service.js';
+import { buildDigest } from '../../services/digest-service.js';
 import { downloadFiles, scanAllConversations } from '../../services/file-service.js';
 import {
   MARKDOWN_FORMAT,
@@ -22,6 +23,7 @@ import { warnIfTokenExpiringSoon } from '../reminders.js';
 import { createReporter, type Reporter } from '../reporter.js';
 import { createRuntime, describeCredentials, type Runtime } from '../runtime.js';
 import { EXIT, handleCommandError, loginHint, notifyIfUnattended } from '../errors.js';
+import { digestLine } from './digest.js';
 
 export interface BackupCommandOptions {
   token?: string;
@@ -37,6 +39,8 @@ export interface BackupCommandOptions {
   downloadFiles: boolean;
   project?: string;
   keepAwake: boolean;
+  /** Rebuild digest/ at the end. */
+  digest: boolean;
   verbose: boolean;
 }
 
@@ -312,6 +316,20 @@ export async function backupCommand(options: BackupCommandOptions): Promise<numb
     }
     // Links to files downloaded after their conversation was saved.
     if (options.downloadFiles) await convertArchive(output, { timeZone });
+
+    // Also after a paused run: the Markdown on disk is complete either way. The digest is derived, so a
+    // problem building it is reported but doesn't change how the backup itself went.
+    if (options.digest && !controller.signal.aborted) {
+      try {
+        const line = digestLine(await buildDigest(output, { signal: controller.signal }));
+        reporter.info(line);
+        await storage.appendLog(line);
+      } catch (error) {
+        const message = `Digest not rebuilt: ${error instanceof Error ? error.message : String(error)}`;
+        reporter.warn(message);
+        await storage.appendLog(message);
+      }
+    }
 
     await updateMetadata(output, {
       timestamp: new Date().toISOString(),

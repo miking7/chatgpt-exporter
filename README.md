@@ -114,6 +114,10 @@ chatgpt-export/
     <id>.json             # the full conversation from the API (all branches)
   projects/<Project_Name>/conversations/   # the same JSON layout per project
   files/<fileId>/<name>   # with --download-files
+  digest/
+    INDEX.md              # one line per chat, by month: title, first message, how many you typed
+    2026-10.md            # a page per month: every message you typed, with its line in the Markdown
+    index.html            # all of it in one page you can search and filter, offline
   metadata.json           # summary of the last run
   backup.log              # what happened, run by run
   .sync-state.json        # when the list was last read in full; chats that keep failing
@@ -124,6 +128,8 @@ The Markdown files are named by the date the chat started, its title and the end
 Each conversation's files carry the chat's own dates: in Finder, **Date Created** is when the chat started and **Date Modified** is when it last changed (Linux and Windows get Date Modified only). **Date Added** shows when the backup last wrote the file. Each Markdown file starts with a small YAML header (`id`, a `url` back to the chat, `title`, `created`, `updated`) that Obsidian and other editors can sort and filter on.
 
 Dates are shown in your time zone, which the first run saves as `CHATGPT_TIMEZONE`, so they don't shift when you travel. Change it there if you like; the next backup redoes the Markdown to match.
+
+The `digest/` folder is for finding a chat again when its title doesn't say what's in it. It lists every chat with the messages you typed (not the replies), shortened, each marked with the line of the Markdown file it starts on (`L120`). Open `digest/index.html` in a browser to search titles and your messages, narrow by month or project, and expand a chat to jump to a message in VS Code; or grep the Markdown pages. Every backup and `convert` rebuilds it from the Markdown, rewriting only the files that changed, so it's never out of date and adds nothing to a backup that found nothing new. Don't edit it: it's regenerated.
 
 ## Commands and options
 
@@ -145,6 +151,7 @@ chatgpt-exporter backup [options]
 | `--download-files` | Also download attachments and images (paced, 1 per 5 s) | off |
 | `--project <name-or-id>` | Only back up one project | all |
 | `--no-keep-awake` | Don't run `caffeinate` during the run | keeps the Mac awake |
+| `--no-digest` | Don't rebuild `digest/` at the end | rebuilds it |
 | `-t, --token <token>` | Use this token instead of the saved one | |
 | `-v, --verbose` | Also print throttling and retry details | |
 
@@ -157,7 +164,8 @@ Other commands:
 - `logout`: remove the saved token.
 - `list [--archived] [--project <name>] [--json]`: list conversations without downloading.
 - `projects [--json]`: list projects.
-- `convert`: regenerate every `.md` from the saved `.json` files and restore the files' dates. Only files whose content changed are rewritten. A backup does this by itself after an update that changes the Markdown.
+- `convert`: regenerate every `.md` from the saved `.json` files and restore the files' dates, then the digest. Only files whose content changed are rewritten. A backup does this by itself after an update that changes the Markdown.
+- `digest`: rebuild `digest/` from the saved Markdown and say what's in it. Backups and `convert` already do this; it's for after `--no-digest`, or to see the counts.
 
 ## Already have an archive from the original tool?
 

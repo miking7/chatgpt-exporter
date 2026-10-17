@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.0-fork.8
+
+### Added
+
+- A `digest/` folder in the archive, for finding a chat again by what you asked rather than its title:
+  - `INDEX.md`: one line per chat, newest first, grouped by month (date, title linked to the Markdown, the first message you typed, how many you typed).
+  - A page per month (`2026-10.md`) listing every message you typed in each chat, shortened, with the line of the Markdown file it starts on (`L120`).
+  - `index.html`: all of it in one offline page. Search titles and your messages (quotes for a phrase), narrow by month, year or project, see how many matches fall in each month, and expand a chat to open a message in VS Code at its line. The search is kept in the address, so a reload keeps it.
+- Every backup rebuilds it at the end (also after a paused run), and so does `convert`. Only files whose content changed are rewritten, so a backup that found nothing new leaves it untouched. A problem building it is reported and logged but doesn't fail the backup.
+- `digest` command: rebuild it on its own and print what's in it (no network requests).
+- `backup --no-digest` skips it.
+
 ## 2.0.0-fork.7
 
 ### Changed

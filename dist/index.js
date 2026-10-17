@@ -165,9 +165,9 @@ function clearSavedToken(settings) {
 }
 
 // src/cli/commands/backup.ts
-import fs10 from "fs/promises";
-import path11 from "path";
-import chalk5 from "chalk";
+import fs11 from "fs/promises";
+import path13 from "path";
+import chalk6 from "chalk";
 
 // src/api/pagination.ts
 async function* conversationPages(client, options = {}) {
@@ -692,13 +692,13 @@ function extractTextFromParts(parts, fileMap) {
 }
 function getLinearThread(mapping, currentNode) {
   if (currentNode && mapping[currentNode]) {
-    const path13 = [];
+    const path15 = [];
     let nodeId = currentNode;
     while (nodeId && mapping[nodeId]) {
-      path13.unshift(mapping[nodeId]);
+      path15.unshift(mapping[nodeId]);
       nodeId = mapping[nodeId].parent;
     }
-    return path13;
+    return path15;
   }
   let root;
   for (const node of Object.values(mapping)) {
@@ -771,7 +771,7 @@ function convertConversation(detail, options) {
     detail.mapping,
     detail.current_node
   );
-  let firstMessage = true;
+  let firstMessage2 = true;
   for (const node of thread) {
     const msg = node.message;
     if (!msg) continue;
@@ -788,9 +788,9 @@ function convertConversation(detail, options) {
       }
     }
     if (!text.trim()) continue;
-    if (firstMessage) {
+    if (firstMessage2) {
       lines.push("");
-      firstMessage = false;
+      firstMessage2 = false;
     } else {
       lines.push("");
       lines.push("---");
@@ -1548,9 +1548,513 @@ var BackupRun = class {
   }
 };
 
-// src/services/sync-state.ts
+// src/services/digest-service.ts
 import fs5 from "fs/promises";
 import path5 from "path";
+
+// src/services/digest-html.ts
+var ENTITIES = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+var escapeHtml = (text) => text.replace(/[&<>"']/g, (c) => ENTITIES[c] ?? c);
+function renderHtml(chats, root) {
+  const records = chats.map((c) => ({
+    title: c.title,
+    url: c.url,
+    date: c.date,
+    created: c.created,
+    updated: c.updated,
+    file: c.file,
+    ...c.project ? { project: c.project } : {},
+    ...c.archived ? { archived: true } : {},
+    replies: c.assistantTurns,
+    turns: c.turns.map((t) => [t.line, t.text]),
+    ...c.fallback ? { opener: [c.fallback.line, c.fallback.text] } : {}
+  }));
+  const data = `[
+${records.map((r) => JSON.stringify(r)).join(",\n")}
+]`.replace(/</g, "\\u003c");
+  return HTML.replace("__ROOT__", () => escapeHtml(root)).replace("__DATA__", () => data);
+}
+var HTML = String.raw`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ChatGPT archive</title>
+<style>
+:root { color-scheme: light dark; --bg: #fff; --fg: #1d1d1f; --muted: #6e6e73; --line: #e5e5ea; --soft: #f2f2f7; --accent: #0a63d6; --mark: #ffe58a; --markfg: #1d1d1f; }
+@media (prefers-color-scheme: dark) { :root { --bg: #151517; --fg: #ececf0; --muted: #9b9ba3; --line: #2d2d33; --soft: #222227; --accent: #7fb0ff; --mark: #6b5600; --markfg: #fff6cc; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.bar { position: sticky; top: 0; z-index: 1; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+h1 { font-size: 16px; margin: 0 0 8px; }
+h1 span { color: var(--muted); font-weight: 400; font-size: 14px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+#q { flex: 1 1 320px; min-width: 0; font: inherit; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: inherit; }
+select, input[type=month] { font: inherit; font-size: 14px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: inherit; }
+label { font-size: 14px; color: var(--muted); display: inline-flex; gap: 5px; align-items: center; }
+#count { font-size: 13px; color: var(--muted); }
+#chips { padding: 8px 16px 4px; font-size: 13px; }
+.year { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 4px; align-items: center; }
+#chips button { font: inherit; border: 1px solid var(--line); background: var(--soft); color: inherit; border-radius: 999px; padding: 1px 8px; cursor: pointer; }
+#chips button span { color: var(--muted); }
+#chips .ylabel { font-weight: 600; background: none; border-color: transparent; min-width: 3.6em; text-align: left; padding-left: 0; }
+#chips button.on { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+#chips button.on span { color: inherit; }
+#chips button.zero { opacity: .4; }
+main { padding: 0 16px 40px; }
+details { border-bottom: 1px solid var(--line); }
+summary { list-style: none; cursor: pointer; padding: 8px 0; }
+summary::-webkit-details-marker { display: none; }
+.head { display: block; }
+.head::before { content: "▸"; display: inline-block; width: 1em; color: var(--muted); }
+details[open] .head::before { content: "▾"; }
+.date { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 8px; }
+.title { font-weight: 600; }
+.badge { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
+.preview { display: block; margin: 2px 0 0 1em; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
+.body { margin: 0 0 12px 1em; font-size: 14px; }
+.turns { margin: 4px 0 8px; padding: 0; list-style: none; }
+.turns li { margin: 0 0 8px; overflow-wrap: anywhere; }
+.ln { color: var(--muted); font-variant-numeric: tabular-nums; margin-right: 6px; }
+.acts { font-size: 12px; white-space: nowrap; margin-left: 4px; }
+.acts button { font: inherit; border: 0; padding: 0; background: none; color: var(--accent); cursor: pointer; }
+.muted { color: var(--muted); font-size: 13px; }
+mark { background: var(--mark); color: var(--markfg); border-radius: 2px; }
+#more { display: block; margin: 16px auto; font: inherit; padding: 6px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--soft); color: inherit; cursor: pointer; }
+.empty { color: var(--muted); padding: 24px 0; }
+@media (max-width: 600px) { .bar { position: static; } #q { flex-basis: 100%; } .controls { gap: 6px 10px; } }
+</style>
+</head>
+<body data-root="__ROOT__">
+<header class="bar">
+<h1>ChatGPT archive <span id="summary"></span></h1>
+<div class="controls">
+<input id="q" type="search" placeholder="Search titles and your questions… quotes for a phrase" autocomplete="off" spellcheck="false" autofocus>
+<label><input id="titles" type="checkbox"> titles only</label>
+<select id="project" aria-label="Project"><option value="">All projects</option></select>
+<label>from <input id="from" type="month" placeholder="YYYY-MM"></label>
+<label>to <input id="to" type="month" placeholder="YYYY-MM"></label>
+<select id="sort" aria-label="Sort"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="turns">Most turns</option></select>
+<span id="count"></span>
+</div>
+</header>
+<nav id="chips" aria-label="Months"></nav>
+<main><div id="list"></div><button id="more" type="button" hidden></button></main>
+<noscript><p>This page needs JavaScript to list and filter the conversations.</p></noscript>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  'use strict';
+  var chats = JSON.parse(document.getElementById('data').textContent);
+  var root = document.body.getAttribute('data-root'); // absolute archive path, for vscode:// links
+  function $(id) { return document.getElementById(id); }
+  var q = $('q'), titlesOnly = $('titles'), project = $('project'), from = $('from'), to = $('to'), sort = $('sort');
+  var list = $('list'), count = $('count'), chips = $('chips'), more = $('more');
+  var LIMIT = 400, NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  var terms = [], showAll = false, timer = 0, months = [], projects = [];
+
+  function fmt(n) { return n.toLocaleString('en-AU'); }
+  function plural(n, one, many) { return fmt(n) + ' ' + (n === 1 ? one : many || one + 's'); }
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
+  function clip(s, n) { if (s.length <= n) return s; var cut = s.slice(0, n), sp = cut.lastIndexOf(' '); return (sp > n * 0.6 ? cut.slice(0, sp) : cut) + '…'; }
+  function encPath(p) { return p.split('/').map(encodeURIComponent).join('/'); }
+
+  // Escape first, then wrap the matched ranges, so a term can never land inside an entity.
+  function hl(s) {
+    var low = s.toLowerCase(), ranges = [], out = '', pos = 0;
+    if (!terms.length || low.length !== s.length) return esc(s);
+    terms.forEach(function (t) { for (var i = low.indexOf(t); i >= 0; i = low.indexOf(t, i + t.length)) ranges.push([i, i + t.length]); });
+    ranges.sort(function (a, b) { return a[0] - b[0]; }).forEach(function (r) {
+      if (r[1] <= pos) return;
+      var start = Math.max(r[0], pos);
+      out += esc(s.slice(pos, start)) + '<mark>' + esc(s.slice(start, r[1])) + '</mark>';
+      pos = r[1];
+    });
+    return out + esc(s.slice(pos));
+  }
+
+  chats.forEach(function (c, i) {
+    c.i = i;
+    c.month = c.date.slice(0, 7);
+    c.texts = c.turns.length ? c.turns : c.opener ? [c.opener] : [];
+    c.lowTitle = c.title.toLowerCase();
+    c.hay = [c.title].concat(c.texts.map(function (t) { return t[1]; })).join('\n').toLowerCase();
+    if (months.indexOf(c.month) < 0) months.push(c.month);
+    if (c.project && projects.indexOf(c.project) < 0) projects.push(c.project);
+  });
+  months.sort().reverse();
+  projects.sort().forEach(function (p) { var o = document.createElement('option'); o.value = o.textContent = p; project.appendChild(o); });
+  if (chats.length) $('summary').textContent = '· ' + plural(chats.length, 'conversation') + ' · ' + months[months.length - 1] + ' to ' + months[0];
+
+  // Words must all appear (any order); "quoted phrases" must appear as written.
+  function parse(s) {
+    var out = [], re = /"([^"]*)"|(\S+)/g, m;
+    while ((m = re.exec(s))) {
+      var t = (m[1] !== undefined ? m[1] : m[2].replace(/"/g, '')).trim().toLowerCase();
+      if (t && out.indexOf(t) < 0) out.push(t);
+    }
+    return out;
+  }
+  function monthOf(input) { return /^\d{4}-\d{2}$/.test(input.value) ? input.value : ''; }
+
+  function update() {
+    terms = parse(q.value);
+    var lo = monthOf(from), hi = monthOf(to), key = titlesOnly.checked ? 'lowTitle' : 'hay', perMonth = {}, hits = [];
+    if (lo && hi && lo > hi) { var x = lo; lo = hi; hi = x; }
+    chats.forEach(function (c) {
+      if (project.value && c.project !== project.value) return;
+      for (var k = 0; k < terms.length; k++) if (c[key].indexOf(terms[k]) < 0) return;
+      perMonth[c.month] = (perMonth[c.month] || 0) + 1; // chip counts ignore the date range
+      if ((!lo || c.month >= lo) && (!hi || c.month <= hi)) hits.push(c);
+    });
+    if (sort.value === 'oldest') hits.reverse();
+    else if (sort.value === 'turns') hits.sort(function (a, b) { return b.turns.length - a.turns.length || a.i - b.i; });
+    renderChips(perMonth, lo, hi);
+    var shown = showAll ? hits : hits.slice(0, LIMIT);
+    list.innerHTML = shown.length ? shown.map(row).join('') : '<p class="empty">No conversations match.</p>';
+    count.textContent = fmt(hits.length) + ' of ' + plural(chats.length, 'conversation');
+    more.hidden = shown.length === hits.length;
+    more.textContent = 'Show all ' + fmt(hits.length);
+    saveHash();
+  }
+
+  function renderChips(perMonth, lo, hi) {
+    var html = '<div class="year"><button type="button"' + (!lo && !hi ? ' class="on"' : '') + '>All</button></div>', year = '';
+    months.forEach(function (m) {
+      var y = m.slice(0, 4), n = perMonth[m] || 0;
+      if (y !== year) {
+        html += (year ? '</div>' : '') + '<div class="year"><button type="button" data-year="' + y + '" class="ylabel' + (lo === y + '-01' && hi === y + '-12' ? ' on' : '') + '">' + y + '</button>';
+        year = y;
+      }
+      html += '<button type="button" data-month="' + m + '" title="' + m + '"' + (lo === m && hi === m ? ' class="on"' : n ? '' : ' class="zero"') + '>' + NAMES[+m.slice(5) - 1] + ' <span>' + fmt(n) + '</span></button>';
+    });
+    chips.innerHTML = html + (year ? '</div>' : '');
+  }
+
+  function row(c) {
+    var badges = (c.project ? '<span class="badge">' + esc(c.project) + '</span>' : '') + (c.archived ? '<span class="badge">archived</span>' : '') +
+      '<span class="badge">' + plural(c.turns.length, 'turn') + '</span>';
+    return '<details data-i="' + c.i + '"><summary><span class="head"><span class="date">' + c.date + '</span><a class="title" href="' + esc(c.url) +
+      '" target="_blank" rel="noopener">' + hl(c.title || 'Untitled') + '</a>' + badges + '</span><span class="preview">' + preview(c) +
+      '</span></summary><div class="body"></div></details>';
+  }
+
+  // The first message, or, when a search term only matches further in, a snippet around the match.
+  function preview(c) {
+    if (!c.texts.length) return '(empty conversation)';
+    var lead = c.turns.length ? '' : '<i>(no typed questions; assistant opened with)</i> ';
+    if (terms.length && !titlesOnly.checked) {
+      for (var k = 0; k < c.texts.length; k++) {
+        var text = c.texts[k][1], low = text.toLowerCase(), at = -1;
+        terms.forEach(function (t) { var i = low.indexOf(t); if (i >= 0 && (at < 0 || i < at)) at = i; });
+        if (at < 0) continue;
+        if (k === 0 && at < 120) break;
+        var start = 0;
+        if (at > 60) { var sp = text.indexOf(' ', at - 60); start = sp >= 0 && sp < at ? sp + 1 : at - 60; }
+        return lead + (k ? '<span class="ln">L' + c.texts[k][0] + '</span>' : '') + (start ? '…' : '') + hl(clip(text.slice(start), 160));
+      }
+    }
+    return lead + hl(clip(c.texts[0][1], 160));
+  }
+
+  function expand(c) {
+    var abs = root + '/' + c.file;
+    var items = c.texts.map(function (t) {
+      return '<li><span class="ln">L' + t[0] + '</span>' + hl(t[1]) + ' <span class="acts"><a href="' + esc('vscode://file' + encPath(abs) + ':' + t[0]) +
+        '">VS Code</a> · <button type="button" data-copy="' + esc(abs + ':' + t[0]) + '">copy path:line</button></span></li>';
+    }).join('');
+    return (c.turns.length ? '' : '<p class="muted">No typed questions; this is how the assistant opened.</p>') + '<ol class="turns">' + items + '</ol>' +
+      '<div class="muted">' + plural(c.replies, 'reply', 'replies') + ' · created ' + esc(c.created.replace('T', ' ')) + ' · updated ' + esc(c.updated.replace('T', ' ')) +
+      ' · <a href="../' + esc(encPath(c.file)) + '">file</a> · <a href="' + esc(c.url) + '" target="_blank" rel="noopener">ChatGPT</a></div>';
+  }
+
+  // "toggle" doesn't bubble, so listen in the capture phase; rows fill in when first opened.
+  list.addEventListener('toggle', function (e) {
+    var d = e.target;
+    if (d.tagName !== 'DETAILS' || !d.open) return;
+    var body = d.querySelector('.body');
+    if (!body.childNodes.length) body.innerHTML = expand(chats[+d.getAttribute('data-i')]);
+  }, true);
+
+  list.addEventListener('click', function (e) {
+    var b = e.target.closest && e.target.closest('button[data-copy]');
+    if (!b) return;
+    var text = b.getAttribute('data-copy'), done = function () { b.textContent = 'copied'; setTimeout(function () { b.textContent = 'copy path:line'; }, 1200); };
+    if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, function () { legacyCopy(text); done(); });
+    else { legacyCopy(text); done(); }
+  });
+  function legacyCopy(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (err) { /* nothing more to try */ }
+    ta.remove();
+  }
+
+  // A month chip selects that month, a year label the whole year; clicking the active one clears it.
+  chips.addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (!b) return;
+    var m = b.getAttribute('data-month'), y = b.getAttribute('data-year'), lo = m || (y ? y + '-01' : ''), hi = m || (y ? y + '-12' : '');
+    if (from.value === lo && to.value === hi) lo = hi = '';
+    from.value = lo; to.value = hi; showAll = false; update();
+  });
+
+  // The search lives in the URL hash, so a reload (or a bookmark) keeps it.
+  var FIELDS = { q: q, project: project, from: from, to: to, sort: sort };
+  function saveHash() {
+    var p = new URLSearchParams();
+    Object.keys(FIELDS).forEach(function (k) { var v = FIELDS[k].value; if (v && !(k === 'sort' && v === 'newest')) p.set(k, v); });
+    if (titlesOnly.checked) p.set('titles', '1');
+    var h = p.toString();
+    if (h === location.hash.slice(1)) return;
+    try { history.replaceState(null, '', h ? '#' + h : location.pathname + location.search); } catch (err) { location.replace('#' + h); }
+  }
+  function loadHash() {
+    var p = new URLSearchParams(location.hash.slice(1));
+    Object.keys(FIELDS).forEach(function (k) { FIELDS[k].value = p.get(k) || (k === 'sort' ? 'newest' : ''); });
+    titlesOnly.checked = p.get('titles') === '1';
+  }
+
+  q.addEventListener('input', function () { clearTimeout(timer); timer = setTimeout(function () { showAll = false; update(); }, 120); });
+  [titlesOnly, project, from, to, sort].forEach(function (el) { el.addEventListener('change', function () { showAll = false; update(); }); });
+  more.addEventListener('click', function () { showAll = true; update(); });
+  window.addEventListener('hashchange', function () { loadHash(); showAll = false; update(); }); // edited URL, back/forward
+  document.addEventListener('keydown', function (e) {
+    var a = document.activeElement, typing = a && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName);
+    if (e.key === '/' && !typing) { e.preventDefault(); q.focus(); q.select(); }
+    else if (e.key === 'Escape' && a === q && q.value) { q.value = ''; showAll = false; update(); }
+  });
+  loadHash();
+  update();
+})();
+</script>
+</body>
+</html>
+`;
+
+// src/services/digest-service.ts
+var HTML_TURN_LIMIT = 800;
+var MONTH_TURN_LIMIT = 400;
+var PREVIEW_LIMIT = 160;
+var NO_QUESTIONS = "(no typed questions; assistant opened with)";
+var GENERATED = "Generated by chatgpt-exporter; do not edit.";
+var MARKER = /^\*\*(User|Assistant):\*\*$/;
+function parseTranscript(source) {
+  const lines = source.split("\n");
+  const end = lines[0] === "---" ? lines.indexOf("---", 1) : -1;
+  if (end < 0) throw new Error("no frontmatter");
+  const meta = /* @__PURE__ */ new Map();
+  for (const line of lines.slice(1, end)) {
+    const sep = line.indexOf(": ");
+    if (sep > 0) meta.set(line.slice(0, sep), line.slice(sep + 2));
+  }
+  const id = meta.get("id");
+  const title = meta.get("title");
+  if (!id || title === void 0) throw new Error("frontmatter lacks id or title");
+  const markers = [];
+  for (let i = end + 1; i < lines.length; i++) {
+    const match = MARKER.exec(lines[i]);
+    if (!match || lines[i - 1] !== "") continue;
+    if (markers.length > 0 && lines[i - 2] !== "---") continue;
+    markers.push({ role: match[1], index: i });
+  }
+  const turns = markers.map(({ role, index }, k) => {
+    const stop = k + 1 < markers.length ? markers[k + 1].index - 2 : lines.length;
+    const text = lines.slice(index + 1, stop).join("\n").replace(/^\n+|\n+$/g, "");
+    return { role, line: index + 1, text };
+  });
+  return {
+    id,
+    title: parseTitle(title),
+    url: meta.get("url"),
+    created: meta.get("created"),
+    updated: meta.get("updated"),
+    turns
+  };
+}
+function parseTitle(value) {
+  let title = value;
+  try {
+    const parsed = JSON.parse(value);
+    if (typeof parsed === "string") title = parsed;
+  } catch {
+  }
+  return title.replace(/\s+/g, " ").trim();
+}
+function cleanText(text) {
+  return text.replace(/```[\s\S]*?```/g, " [code] ").replace(/!\[[^\]]*\]\([^)]*\)/g, " [image] ").replace(/[\u0000-\u0008\u000e-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim();
+}
+function truncate(text, limit) {
+  if (text.length <= limit) return { text, truncated: false };
+  let cut = text.slice(0, limit);
+  const space = cut.lastIndexOf(" ");
+  if (space >= limit * 0.6) cut = cut.slice(0, space);
+  else if (/[\uD800-\uDBFF]$/.test(cut)) cut = cut.slice(0, -1);
+  return { text: cut.replace(/[\s,;:.]+$/, "") + "\u2026", truncated: true };
+}
+function buildChat(file, source, lookups) {
+  const t = parseTranscript(source);
+  const name = path5.posix.basename(file);
+  const date = /^\d{4}-\d{2}-\d{2}(?= )/.exec(name)?.[0] ?? t.created?.slice(0, 10) ?? "";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("no date in the file name or frontmatter");
+  const userTurns = t.turns.filter((turn) => turn.role === "User");
+  const firstReply = t.turns.find((turn) => turn.role === "Assistant");
+  const chat = {
+    id: t.id,
+    suffix: suffixOfMarkdownName(name) ?? idSuffix(t.id),
+    title: t.title,
+    url: t.url ?? `https://chatgpt.com/c/${t.id}`,
+    date,
+    created: t.created ?? date,
+    updated: t.updated ?? t.created ?? date,
+    file,
+    project: lookups.projectOf.get(t.id) ?? null,
+    archived: lookups.archived.has(t.id),
+    turns: userTurns.map((turn, i) => ({ n: i + 1, line: turn.line, ...truncate(cleanText(turn.text), HTML_TURN_LIMIT) })),
+    assistantTurns: t.turns.length - userTurns.length
+  };
+  if (chat.turns.length === 0 && firstReply) {
+    chat.fallback = { n: 0, line: firstReply.line, ...truncate(cleanText(firstReply.text), PREVIEW_LIMIT) };
+  }
+  return chat;
+}
+async function readList(file) {
+  try {
+    const parsed = JSON.parse(await fs5.readFile(file, "utf-8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+}
+async function loadLookups(outputDir) {
+  const archived = /* @__PURE__ */ new Set();
+  for (const item of await readList(path5.join(outputDir, "conversations", "index.json"))) if (item.is_archived) archived.add(item.id);
+  const projectOf = /* @__PURE__ */ new Map();
+  const projectsDir = path5.join(outputDir, "projects");
+  const folders = [];
+  for (const entry of await fs5.readdir(projectsDir, { withFileTypes: true }).catch(() => [])) {
+    if (entry.isDirectory()) folders.push(entry.name);
+  }
+  for (const folder of folders.sort()) {
+    for (const item of await readList(path5.join(projectsDir, folder, "conversations", "index.json"))) projectOf.set(item.id, folder);
+  }
+  return { projectOf, archived };
+}
+function sortNewestFirst(chats) {
+  const time = (c) => Date.parse(c.created) || Date.parse(c.date);
+  return chats.sort((a, b) => time(b) - time(a) || (a.file < b.file ? 1 : a.file > b.file ? -1 : 0));
+}
+function groupByMonth(chats) {
+  const months = /* @__PURE__ */ new Map();
+  for (const chat of chats) {
+    const month = chat.date.slice(0, 7);
+    if (!months.has(month)) months.set(month, []);
+    months.get(month).push(chat);
+  }
+  return [...months].sort((a, b) => a[0] < b[0] ? 1 : -1);
+}
+var linkText = (text) => (text || "Untitled").replace(/[\\[\]|]/g, "\\$&");
+var transcriptLink = (chat) => `[${linkText(chat.title)}](<../${chat.file.replace(/[<>]/g, (c) => encodeURIComponent(c))}>)`;
+var tags = (chat) => (chat.project ? ` \xB7 project: ${chat.project}` : "") + (chat.archived ? " \xB7 archived" : "");
+function firstMessage(chat, limit) {
+  if (chat.turns.length) return truncate(chat.turns[0].text, limit).text;
+  if (chat.fallback) return `${NO_QUESTIONS} ${truncate(chat.fallback.text, limit).text}`;
+  return "(empty conversation)";
+}
+function renderIndex(months, total) {
+  const out = [
+    "# Conversation index",
+    "",
+    `${plural(total, "conversation")}, newest first, grouped by month. One line per chat: date \xB7 title (linked`,
+    "to the transcript) \xB7 the first message you typed \xB7 how many messages you typed. Line anchors (`L<n>`)",
+    `are on the monthly pages. ${GENERATED}`,
+    "",
+    `Months: ${months.map(([month, list]) => `[${month}](${month}.md) (${list.length})`).join(" \xB7 ")}`
+  ];
+  for (const [month, list] of months) {
+    out.push("", `## ${month} (${list.length})`, "");
+    for (const chat of list) {
+      out.push(`- ${chat.date} \xB7 ${transcriptLink(chat)} \xB7 ${firstMessage(chat, PREVIEW_LIMIT)} \xB7 ${plural(chat.turns.length, "turn")}${tags(chat)}`);
+    }
+  }
+  return out.join("\n") + "\n";
+}
+function renderMonth(month, list, older, newer) {
+  const nav = ["[INDEX](INDEX.md)", older && `older: [${older}](${older}.md)`, newer && `newer: [${newer}](${newer}.md)`];
+  const out = [
+    `# ${month} \u2014 ${plural(list.length, "conversation")}`,
+    "",
+    nav.filter(Boolean).join(" \xB7 "),
+    "",
+    "Each entry: title (linked to the transcript), date, how many messages you typed, ChatGPT link; then each",
+    "message you typed, prefixed with the transcript line of its `**User:**` marker (open with",
+    `\`Read \u2026 offset <n>\` or \`sed -n '<n>,+40p'\`). ${GENERATED}`
+  ];
+  for (const chat of list) {
+    out.push("", `## ${transcriptLink(chat)}`, "");
+    out.push(`${chat.date} \xB7 ${plural(chat.turns.length, "turn")} \xB7 [open in ChatGPT](${chat.url})${tags(chat)}`, "");
+    for (const turn of chat.turns) out.push(`- L${turn.line}: ${truncate(turn.text, MONTH_TURN_LIMIT).text}`);
+    if (chat.fallback) out.push(`- L${chat.fallback.line} ${NO_QUESTIONS}: ${chat.fallback.text}`);
+    else if (!chat.turns.length) out.push("- (empty conversation)");
+  }
+  return out.join("\n") + "\n";
+}
+async function writeIfChanged(file, content) {
+  const current = await fs5.readFile(file, "utf-8").catch(() => null);
+  if (current === content) return false;
+  await writeAtomic(file, content);
+  return true;
+}
+async function buildDigest(outputDir, options = {}) {
+  const lookups = await loadLookups(outputDir);
+  const markdownDir = path5.join(outputDir, "markdown");
+  const names = (await fs5.readdir(markdownDir).catch(() => [])).filter((name) => name.endsWith(".md")).sort();
+  const chats = [];
+  const failures = [];
+  for (const name of names) {
+    if (options.signal?.aborted) throw abortError(options.signal);
+    const file = `markdown/${name}`;
+    try {
+      chats.push(buildChat(file, await fs5.readFile(path5.join(markdownDir, name), "utf-8"), lookups));
+    } catch (error) {
+      failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  sortNewestFirst(chats);
+  const months = groupByMonth(chats);
+  const result = {
+    chats: chats.length,
+    userTurns: chats.reduce((sum, c) => sum + c.turns.length, 0),
+    assistantTurns: chats.reduce((sum, c) => sum + c.assistantTurns, 0),
+    months: months.length,
+    files: 0,
+    written: 0,
+    removed: [],
+    silent: chats.filter((c) => c.turns.length === 0).map((c) => path5.posix.basename(c.file)),
+    failures,
+    bytes: { index: 0, months: 0, html: 0 }
+  };
+  if (chats.length === 0) return result;
+  const outputs = /* @__PURE__ */ new Map([["INDEX.md", renderIndex(months, chats.length)]]);
+  months.forEach(([month, list], i) => outputs.set(`${month}.md`, renderMonth(month, list, months[i + 1]?.[0], months[i - 1]?.[0])));
+  outputs.set("index.html", renderHtml(chats, path5.resolve(outputDir)));
+  const digestDir = path5.join(outputDir, "digest");
+  await fs5.mkdir(digestDir, { recursive: true });
+  for (const [name, content] of outputs) if (await writeIfChanged(path5.join(digestDir, name), content)) result.written += 1;
+  result.removed = (await fs5.readdir(digestDir)).filter((name) => /^\d{4}-\d{2}\.md$/.test(name) && !outputs.has(name));
+  for (const name of result.removed) await fs5.rm(path5.join(digestDir, name), { force: true });
+  const size = (name) => Buffer.byteLength(outputs.get(name) ?? "");
+  result.files = outputs.size;
+  result.bytes = { index: size("INDEX.md"), months: months.reduce((sum, [m]) => sum + size(`${m}.md`), 0), html: size("index.html") };
+  return result;
+}
+
+// src/services/sync-state.ts
+import fs6 from "fs/promises";
+import path6 from "path";
 var MAX_FAILED_RUNS = 3;
 var SyncStateStore = class _SyncStateStore {
   filePath;
@@ -1560,10 +2064,10 @@ var SyncStateStore = class _SyncStateStore {
     this.state = state;
   }
   static async load(outputDir) {
-    const filePath = path5.join(outputDir, ".sync-state.json");
+    const filePath = path6.join(outputDir, ".sync-state.json");
     let state = { version: 1, failures: {} };
     try {
-      const parsed = JSON.parse(await fs5.readFile(filePath, "utf-8"));
+      const parsed = JSON.parse(await fs6.readFile(filePath, "utf-8"));
       state = {
         version: 1,
         lastFullListingAt: parsed.lastFullListingAt,
@@ -1614,8 +2118,8 @@ var SyncStateStore = class _SyncStateStore {
 };
 
 // src/cli/output-dir.ts
-import fs6 from "fs/promises";
-import path6 from "path";
+import fs7 from "fs/promises";
+import path7 from "path";
 import chalk from "chalk";
 
 // src/utils/prompt.ts
@@ -1667,7 +2171,7 @@ function promptHidden(question) {
 // src/cli/output-dir.ts
 async function looksLikeArchive(dir) {
   try {
-    await fs6.access(path6.join(dir, "conversations", "index.json"));
+    await fs7.access(path7.join(dir, "conversations", "index.json"));
     return true;
   } catch {
     return false;
@@ -1675,14 +2179,14 @@ async function looksLikeArchive(dir) {
 }
 async function chooseOutputDir(settings, flag) {
   if (flag || isOutputDirConfigured(settings)) return resolveOutputDir(settings, flag);
-  const local = path6.resolve("chatgpt-export");
+  const local = path7.resolve("chatgpt-export");
   const suggestion = await looksLikeArchive(local) ? local : defaultOutputDir();
   let chosen = suggestion;
   if (isInteractive()) {
     console.log(chalk.bold("\nWhere should the archive go?"));
     console.log(chalk.dim("  Each conversation is saved there as JSON and Markdown. Press Enter to accept the suggestion."));
     const answer = (await promptLine(`  Archive folder [${suggestion}]: `)).trim();
-    chosen = answer ? path6.resolve(expandHome(answer)) : suggestion;
+    chosen = answer ? path7.resolve(expandHome(answer)) : suggestion;
   }
   await saveSettings(settings, { [ENV.exportDir]: chosen });
   console.log(chalk.dim(`  Archive folder saved to ${settings.configPath} (edit ${ENV.exportDir} there, or pass -o).
@@ -1691,9 +2195,9 @@ async function chooseOutputDir(settings, flag) {
 }
 
 // src/utils/lock.ts
-import fs7 from "fs";
+import fs8 from "fs";
 import fsp2 from "fs/promises";
-import path7 from "path";
+import path8 from "path";
 var AlreadyRunningError = class extends Error {
   constructor(pid, startedAt) {
     super(`Another backup is already running (pid ${pid}${startedAt ? `, started ${startedAt}` : ""}).`);
@@ -1710,7 +2214,7 @@ function isAlive(pid) {
 }
 async function acquireLock(dir, name = "backup.lock") {
   await fsp2.mkdir(dir, { recursive: true });
-  const file = path7.join(dir, name);
+  const file = path8.join(dir, name);
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const handle = await fsp2.open(file, "wx");
@@ -1721,7 +2225,7 @@ async function acquireLock(dir, name = "backup.lock") {
         if (released) return;
         released = true;
         try {
-          fs7.unlinkSync(file);
+          fs8.unlinkSync(file);
         } catch {
         }
       };
@@ -1749,7 +2253,7 @@ async function acquireLock(dir, name = "backup.lock") {
 }
 async function lockHolder(dir, name = "backup.lock") {
   try {
-    const holder = JSON.parse(await fsp2.readFile(path7.join(dir, name), "utf-8"));
+    const holder = JSON.parse(await fsp2.readFile(path8.join(dir, name), "utf-8"));
     return holder.pid && isAlive(holder.pid) ? { pid: holder.pid, startedAt: holder.startedAt } : null;
   } catch {
     return null;
@@ -1782,8 +2286,8 @@ function notify(title, message) {
 }
 
 // src/cli/reminders.ts
-import fs8 from "fs/promises";
-import path8 from "path";
+import fs9 from "fs/promises";
+import path9 from "path";
 
 // src/auth/tokens.ts
 var JWT_RE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/;
@@ -1861,17 +2365,17 @@ function parseCredentialsText(text) {
 var EXPIRY_WARNING_MS = 2 * 24 * 36e5;
 var REPEAT_MS = 24 * 36e5;
 async function remindOncePerDay(stateDir, key, message, about = "", send = notify) {
-  const stampPath = path8.join(stateDir, `reminder-${key}.json`);
+  const stampPath = path9.join(stateDir, `reminder-${key}.json`);
   let stamp = {};
   try {
-    stamp = JSON.parse(await fs8.readFile(stampPath, "utf-8"));
+    stamp = JSON.parse(await fs9.readFile(stampPath, "utf-8"));
   } catch {
   }
   const due = stamp.about !== about || Date.now() - (stamp.notifiedAt ?? 0) >= REPEAT_MS;
   if (!due) return false;
   send("ChatGPT exporter", message);
-  await fs8.mkdir(stateDir, { recursive: true });
-  await fs8.writeFile(stampPath, JSON.stringify({ notifiedAt: Date.now(), about }));
+  await fs9.mkdir(stateDir, { recursive: true });
+  await fs9.writeFile(stampPath, JSON.stringify({ notifiedAt: Date.now(), about }));
   return true;
 }
 async function warnIfTokenExpiringSoon(settings, accessToken, send = notify) {
@@ -2098,7 +2602,7 @@ var PlainReporter = class {
 };
 
 // src/cli/runtime.ts
-import path10 from "path";
+import path11 from "path";
 
 // src/api/client.ts
 import crypto from "crypto";
@@ -2311,8 +2815,8 @@ var ChatGPTClient = class {
 };
 
 // src/api/scheduler.ts
-import fs9 from "fs/promises";
-import path9 from "path";
+import fs10 from "fs/promises";
+import path10 from "path";
 var KINDS = ["conversation", "list", "file"];
 var MAX_SLOWDOWN = 4;
 var MAX_SLEEP_SLICE_MS = 3e4;
@@ -2429,7 +2933,7 @@ var RequestScheduler = class _RequestScheduler {
     if (!this.config.statePath) return;
     let raw;
     try {
-      raw = await fs9.readFile(this.config.statePath, "utf-8");
+      raw = await fs10.readFile(this.config.statePath, "utf-8");
     } catch {
       return;
     }
@@ -2466,10 +2970,10 @@ var RequestScheduler = class _RequestScheduler {
       throttleStreaks: { ...this.throttleStreaks }
     };
     try {
-      await fs9.mkdir(path9.dirname(statePath), { recursive: true });
+      await fs10.mkdir(path10.dirname(statePath), { recursive: true });
       const tmp = `${statePath}.${process.pid}.tmp`;
-      await fs9.writeFile(tmp, JSON.stringify(state, null, 2));
-      await fs9.rename(tmp, statePath);
+      await fs10.writeFile(tmp, JSON.stringify(state, null, 2));
+      await fs10.rename(tmp, statePath);
     } catch {
     }
   }
@@ -2626,7 +3130,7 @@ function resolvePacing(settings, flags) {
   return { paceSeconds, burst: Math.max(1, Math.floor(burst)) };
 }
 function rateLimitStatePath(settings) {
-  return path10.join(settings.stateDir, "rate-limit.json");
+  return path11.join(settings.stateDir, "rate-limit.json");
 }
 function schedulerConfig(settings, pacing) {
   return {
@@ -2786,6 +3290,45 @@ Error: ${error instanceof Error ? error.message : String(error)}`));
   return EXIT.error;
 }
 
+// src/cli/commands/digest.ts
+import path12 from "path";
+import chalk5 from "chalk";
+var kb = (bytes) => `${formatCount(Math.round(bytes / 1024))} KB`;
+function digestLine(result) {
+  return `Digest: ${formatCount(result.written)} of ${plural(result.files, "file")} updated in digest/ (${plural(result.chats, "chat")})` + (result.failures.length > 0 ? `; ${plural(result.failures.length, "Markdown file")} couldn't be read` : "");
+}
+async function digestCommand(options) {
+  const reporter = createReporter();
+  let lock;
+  try {
+    const settings = await loadSettings();
+    const output = resolveOutputDir(settings, options.output);
+    lock = await acquireLock(settings.stateDir);
+    const started = performance.now();
+    reporter.spin("Building the digest\u2026");
+    const result = await buildDigest(output);
+    reporter.finish();
+    if (result.chats === 0) {
+      console.log(`No saved conversations in ${chalk5.cyan(path12.join(output, "markdown"))}`);
+      return result.failures.length > 0 ? EXIT.error : EXIT.ok;
+    }
+    console.log(
+      `Parsed ${plural(result.chats, "transcript")} in ${((performance.now() - started) / 1e3).toFixed(1)} s: ${plural(result.userTurns, "user turn")}, ${plural(result.assistantTurns, "assistant turn")}, ${plural(result.months, "month")}.`
+    );
+    if (result.silent.length > 0) console.log(`No typed questions (${result.silent.length}): ${result.silent.join("; ")}`);
+    console.log(
+      `Wrote ${formatCount(result.written)} of ${plural(result.files, "file")} to ${chalk5.cyan(path12.join(output, "digest"))}` + (result.removed.length > 0 ? ` (removed ${result.removed.join(", ")})` : "") + `: INDEX.md ${kb(result.bytes.index)}, month pages ${kb(result.bytes.months)}, index.html ${kb(result.bytes.html)}.`
+    );
+    for (const failure of result.failures) console.error(chalk5.red(`Couldn't parse ${failure}`));
+    return result.failures.length > 0 ? EXIT.error : EXIT.ok;
+  } catch (error) {
+    reporter.finish();
+    return handleCommandError(error);
+  } finally {
+    await lock?.release();
+  }
+}
+
 // src/cli/commands/backup.ts
 var STOP_MESSAGES = {
   "max-downloads": "reached --max-downloads",
@@ -2818,50 +3361,50 @@ function describePlan(plan) {
   if (plan.copied > 0) parts.push(`${formatCount(plan.copied)} copied between folders`);
   if (plan.skippedFailed > 0) parts.push(`${formatCount(plan.skippedFailed)} skipped after repeated failures`);
   if (plan.skippedSince > 0) parts.push(`${formatCount(plan.skippedSince)} older than --since`);
-  parts.push(plan.toDownload > 0 ? chalk5.bold(`${formatCount(plan.toDownload)} to download`) : "nothing new to download");
+  parts.push(plan.toDownload > 0 ? chalk6.bold(`${formatCount(plan.toDownload)} to download`) : "nothing new to download");
   return parts.join(" \xB7 ");
 }
 function printSettings(runtime, output, timeZone, options) {
   const { paceSeconds, burst } = runtime.pacing;
   const perHour = Math.round(3600 / paceSeconds);
-  console.log(chalk5.dim(`  Output:  ${output} \xB7 dates in ${timeZone}`));
+  console.log(chalk6.dim(`  Output:  ${output} \xB7 dates in ${timeZone}`));
   console.log(
-    chalk5.dim(
+    chalk6.dim(
       `  Mode:    ${options.full ? "full (re-download everything)" : "incremental (new and changed chats, then older gaps)"}${options.archived ? " \xB7 archived chats included" : ""}${options.project ? ` \xB7 project "${options.project}" only` : ""}`
     )
   );
   console.log(
-    chalk5.dim(
+    chalk6.dim(
       `  Pace:    1 conversation every ${paceSeconds}s (\u2248 ${perHour}/hour) after a burst of up to ${burst}${options.maxDownloads ? ` \xB7 stop after ${options.maxDownloads}` : ""}`
     )
   );
   if (paceSeconds < 60) {
-    console.log(chalk5.yellow("  Note: faster than ChatGPT refills (~1/minute), so this may slow down your own ChatGPT use."));
+    console.log(chalk6.yellow("  Note: faster than ChatGPT refills (~1/minute), so this may slow down your own ChatGPT use."));
   }
   console.log();
 }
 function printSummary(result, runtime, output) {
   const finished = !result.stopReason;
-  const heading = finished ? chalk5.green("\n\u2714 Backup finished") : chalk5.yellow("\n\u23F8 Backup paused");
+  const heading = finished ? chalk6.green("\n\u2714 Backup finished") : chalk6.yellow("\n\u23F8 Backup paused");
   console.log(heading);
   console.log(`  Downloaded   ${formatCount(result.downloaded)}`);
   console.log(`  Up to date   ${formatCount(result.upToDate)}`);
   if (result.copied > 0) console.log(`  Copied       ${formatCount(result.copied)} (already downloaded in another folder)`);
-  if (result.failed > 0) console.log(`  Failed       ${chalk5.red(formatCount(result.failed))} (details in backup.log; retried next run)`);
+  if (result.failed > 0) console.log(`  Failed       ${chalk6.red(formatCount(result.failed))} (details in backup.log; retried next run)`);
   if (result.skippedFailed > 0) {
     console.log(`  Parked       ${formatCount(result.skippedFailed)} that failed in several runs (use --retry-failed)`);
   }
   if (result.remaining > 0) {
     const eta = formatDuration(runtime.scheduler.estimateMs(result.remaining));
-    console.log(`  Still to do  ${chalk5.bold(formatCount(result.remaining))} \xB7 \u2248 ${eta} at this pace; run backup again to continue`);
+    console.log(`  Still to do  ${chalk6.bold(formatCount(result.remaining))} \xB7 \u2248 ${eta} at this pace; run backup again to continue`);
   }
   if (result.stopReason) {
-    console.log(`  Stopped      ${STOP_MESSAGES[result.stopReason]}${result.stopDetail && result.stopReason !== "interrupted" ? chalk5.dim(` (${result.stopDetail})`) : ""}`);
+    console.log(`  Stopped      ${STOP_MESSAGES[result.stopReason]}${result.stopDetail && result.stopReason !== "interrupted" ? chalk6.dim(` (${result.stopDetail})`) : ""}`);
   }
   if (result.workspaceIds.length > 1) {
-    console.log(chalk5.yellow(`  Note: conversations came from ${result.workspaceIds.length} workspaces: ${result.workspaceIds.join(", ")}`));
+    console.log(chalk6.yellow(`  Note: conversations came from ${result.workspaceIds.length} workspaces: ${result.workspaceIds.join(", ")}`));
   }
-  console.log(`  Output       ${chalk5.cyan(output)}`);
+  console.log(`  Output       ${chalk6.cyan(output)}`);
   if (result.stopReason === "auth") console.log(`
 ${loginHint()}`);
 }
@@ -2885,7 +3428,7 @@ async function upgradeMarkdown(output, timeZone, storage, reporter, signal) {
 }
 async function loadFailedFiles(output) {
   try {
-    const metadata = JSON.parse(await fs10.readFile(path11.join(output, "metadata.json"), "utf-8"));
+    const metadata = JSON.parse(await fs11.readFile(path13.join(output, "metadata.json"), "utf-8"));
     if (Array.isArray(metadata.failedFiles)) return new Set(metadata.failedFiles);
   } catch {
   }
@@ -2947,7 +3490,7 @@ async function backupCommand(options) {
     await removeStaleTempFiles(output);
     const log = async (message) => {
       await storage.appendLog(message);
-      if (options.verbose) reporter.info(chalk5.dim(message));
+      if (options.verbose) reporter.info(chalk6.dim(message));
     };
     await upgradeMarkdown(output, timeZone, storage, reporter, controller.signal);
     reporter.spin("Checking your ChatGPT sign-in\u2026");
@@ -2962,10 +3505,10 @@ async function backupCommand(options) {
     });
     const { email, expiresAt } = describeCredentials(runtime.credentials());
     reporter.spinDone(
-      `Signed in${email ? ` as ${email}` : ""}${runtime.workspaceId ? ` \xB7 workspace ${runtime.workspaceId}` : ""}` + (expiresAt ? chalk5.dim(` \xB7 token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)})`) : "")
+      `Signed in${email ? ` as ${email}` : ""}${runtime.workspaceId ? ` \xB7 workspace ${runtime.workspaceId}` : ""}` + (expiresAt ? chalk6.dim(` \xB7 token valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt)})`) : "")
     );
     if (runtime.tokenSource === "environment") {
-      reporter.info(chalk5.dim("  Using CHATGPT_TOKEN from your shell environment (it takes priority over config.env)."));
+      reporter.info(chalk6.dim("  Using CHATGPT_TOKEN from your shell environment (it takes priority over config.env)."));
     }
     if (!reporter.interactive) {
       const warning = await warnIfTokenExpiringSoon(settings, runtime.credentials().accessToken);
@@ -3019,6 +3562,17 @@ async function backupCommand(options) {
       }
     }
     if (options.downloadFiles) await convertArchive(output, { timeZone });
+    if (options.digest && !controller.signal.aborted) {
+      try {
+        const line = digestLine(await buildDigest(output, { signal: controller.signal }));
+        reporter.info(line);
+        await storage.appendLog(line);
+      } catch (error) {
+        const message = `Digest not rebuilt: ${error instanceof Error ? error.message : String(error)}`;
+        reporter.warn(message);
+        await storage.appendLog(message);
+      }
+    }
     await updateMetadata(output, {
       timestamp: (/* @__PURE__ */ new Date()).toISOString(),
       mode: options.full ? "full" : "incremental",
@@ -3052,7 +3606,7 @@ async function backupCommand(options) {
 }
 
 // src/cli/commands/convert.ts
-import chalk6 from "chalk";
+import chalk7 from "chalk";
 async function convertCommand(options) {
   const reporter = createReporter();
   let lock;
@@ -3068,15 +3622,18 @@ async function convertCommand(options) {
     reporter.finish();
     const converted = result.converted + result.unchanged;
     if (converted + result.errors === 0) {
-      console.log(`No saved conversations in ${chalk6.cyan(output)}`);
+      console.log(`No saved conversations in ${chalk7.cyan(output)}`);
       return EXIT.ok;
     }
     await updateMetadata(output, { markdownFormat: MARKDOWN_FORMAT, markdownTimeZone: timeZone });
     console.log(
-      `Converted ${plural(converted, "conversation")} in ${chalk6.cyan(output)} (dates in ${timeZone}): ${formatCount(result.converted)} Markdown files rewritten, ${formatCount(result.unchanged)} already current`
+      `Converted ${plural(converted, "conversation")} in ${chalk7.cyan(output)} (dates in ${timeZone}): ${formatCount(result.converted)} Markdown files rewritten, ${formatCount(result.unchanged)} already current`
     );
-    if (result.errors > 0) console.log(chalk6.red(`  ${formatCount(result.errors)} couldn't be converted`));
-    return result.errors > 0 ? EXIT.error : EXIT.ok;
+    if (result.errors > 0) console.log(chalk7.red(`  ${formatCount(result.errors)} couldn't be converted`));
+    const digest = await buildDigest(output);
+    console.log(digestLine(digest));
+    for (const failure of digest.failures) console.error(chalk7.red(`  Couldn't parse ${failure}`));
+    return result.errors > 0 || digest.failures.length > 0 ? EXIT.error : EXIT.ok;
   } catch (error) {
     reporter.finish();
     return handleCommandError(error);
@@ -3086,7 +3643,7 @@ async function convertCommand(options) {
 }
 
 // src/cli/commands/list.ts
-import chalk7 from "chalk";
+import chalk8 from "chalk";
 async function listCommand(options) {
   const reporter = createReporter();
   try {
@@ -3117,12 +3674,12 @@ async function listCommand(options) {
     }
     console.log();
     for (const conv of conversations) {
-      const title = conv.title ?? chalk7.dim("(untitled)");
+      const title = conv.title ?? chalk8.dim("(untitled)");
       const date = conv.update_time ? new Date(typeof conv.update_time === "number" ? conv.update_time * 1e3 : conv.update_time).toLocaleDateString() : "unknown date";
-      console.log(`${chalk7.cyan(conv.id)} ${title} ${chalk7.dim(`[${date}]`)}`);
+      console.log(`${chalk8.cyan(conv.id)} ${title} ${chalk8.dim(`[${date}]`)}`);
     }
     console.log();
-    console.log(chalk7.green(`Total: ${plural(conversations.length, "conversation")}`));
+    console.log(chalk8.green(`Total: ${plural(conversations.length, "conversation")}`));
     return EXIT.ok;
   } catch (error) {
     reporter.finish();
@@ -3131,7 +3688,7 @@ async function listCommand(options) {
 }
 
 // src/cli/commands/login.ts
-import chalk8 from "chalk";
+import chalk9 from "chalk";
 async function loginCommand(options) {
   if (!isInteractive()) {
     console.error("`login` needs an interactive terminal.");
@@ -3143,10 +3700,10 @@ async function loginCommand(options) {
     const credentials = await runLogin(settings, scheduler, { method: options.console ? "console" : "session-page" });
     if (!credentials) return EXIT.error;
     if (process.env[ENV.token]) {
-      console.log(chalk8.yellow(`  Note: CHATGPT_TOKEN is also set in your shell and takes priority over config.env while it's valid; run \`unset ${ENV.token}\`.`));
+      console.log(chalk9.yellow(`  Note: CHATGPT_TOKEN is also set in your shell and takes priority over config.env while it's valid; run \`unset ${ENV.token}\`.`));
     }
     const output = await chooseOutputDir(settings);
-    console.log(`Next: run ${chalk8.cyan(`${CLI_NAME} backup`)} to start backing up to ${output}`);
+    console.log(`Next: run ${chalk9.cyan(`${CLI_NAME} backup`)} to start backing up to ${output}`);
     return EXIT.ok;
   } catch (error) {
     return handleCommandError(error);
@@ -3156,12 +3713,12 @@ async function logoutCommand() {
   const settings = await loadSettings();
   await clearSavedToken(settings);
   console.log(`Removed the saved token from ${settings.configPath}.`);
-  if (process.env[ENV.token]) console.log(chalk8.yellow(`CHATGPT_TOKEN is still set in your shell environment.`));
+  if (process.env[ENV.token]) console.log(chalk9.yellow(`CHATGPT_TOKEN is still set in your shell environment.`));
   return EXIT.ok;
 }
 
 // src/cli/commands/projects.ts
-import chalk9 from "chalk";
+import chalk10 from "chalk";
 async function projectsCommand(options) {
   const reporter = createReporter();
   try {
@@ -3186,10 +3743,10 @@ async function projectsCommand(options) {
     for (const project of projects) {
       const gizmo = project.gizmo;
       const lastInteracted = gizmo.last_interacted_at ? new Date(gizmo.last_interacted_at).toLocaleDateString() : "never";
-      console.log(`${chalk9.cyan(gizmo.id)} ${chalk9.bold(gizmo.display.name)} ${chalk9.dim(`[last: ${lastInteracted}]`)}`);
+      console.log(`${chalk10.cyan(gizmo.id)} ${chalk10.bold(gizmo.display.name)} ${chalk10.dim(`[last: ${lastInteracted}]`)}`);
     }
     console.log();
-    console.log(chalk9.green(`Total: ${plural(projects.length, "project")}`));
+    console.log(chalk10.green(`Total: ${plural(projects.length, "project")}`));
     return EXIT.ok;
   } catch (error) {
     reporter.finish();
@@ -3198,19 +3755,19 @@ async function projectsCommand(options) {
 }
 
 // src/cli/commands/status.ts
-import fs11 from "fs/promises";
-import path12 from "path";
-import chalk10 from "chalk";
+import fs12 from "fs/promises";
+import path14 from "path";
+import chalk11 from "chalk";
 async function readJson(file) {
   try {
-    return JSON.parse(await fs11.readFile(file, "utf-8"));
+    return JSON.parse(await fs12.readFile(file, "utf-8"));
   } catch {
     return null;
   }
 }
 async function downloadedIds(dir) {
   try {
-    const files = await fs11.readdir(dir);
+    const files = await fs12.readdir(dir);
     return new Set(files.filter((f) => f.endsWith(".json") && f !== "index.json").map((f) => f.slice(0, -5)));
   } catch {
     return /* @__PURE__ */ new Set();
@@ -3222,32 +3779,32 @@ async function statusCommand(options) {
   const output = resolveOutputDir(settings, options.output);
   const pacing = resolvePacing(settings, {});
   const now = Date.now();
-  console.log(chalk10.bold("ChatGPT exporter status"));
-  const configExists = await fs11.stat(settings.configPath).then(() => true, () => false);
-  row("Settings", `${settings.configPath}${configExists ? "" : chalk10.dim(" (not created yet)")}`);
+  console.log(chalk11.bold("ChatGPT exporter status"));
+  const configExists = await fs12.stat(settings.configPath).then(() => true, () => false);
+  row("Settings", `${settings.configPath}${configExists ? "" : chalk11.dim(" (not created yet)")}`);
   const { chosen, expired } = pickToken(tokenCandidates(settings), now);
   if (chosen) {
     const info = getTokenInfo(chosen.token);
     const expiresAt = tokenExpiresAt(chosen.token);
     row(
       "Sign-in",
-      `${info?.email ?? "token saved"}` + (expiresAt ? ` \xB7 valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt, now)})` : "") + (chosen.source === "environment" ? chalk10.dim(" \xB7 from CHATGPT_TOKEN in your shell") : "")
+      `${info?.email ?? "token saved"}` + (expiresAt ? ` \xB7 valid until ${formatDateTime(expiresAt)} (${formatRelative(expiresAt, now)})` : "") + (chosen.source === "environment" ? chalk11.dim(" \xB7 from CHATGPT_TOKEN in your shell") : "")
     );
   } else {
     const expiredAt = expired[0] ? tokenExpiresAt(expired[0].token) : null;
-    row("Sign-in", chalk10.yellow(`${expiredAt ? `token expired ${formatRelative(expiredAt, now)}` : "not signed in"}; run \`${CLI_NAME} login\``));
+    row("Sign-in", chalk11.yellow(`${expiredAt ? `token expired ${formatRelative(expiredAt, now)}` : "not signed in"}; run \`${CLI_NAME} login\``));
   }
   const accountId = getSetting(settings, ENV.accountId);
   if (accountId) row("Workspace", accountId);
-  row("Output", `${output}${options.output || isOutputDirConfigured(settings) ? "" : chalk10.dim(" (default; the first backup asks where to keep the archive)")}`);
+  row("Output", `${output}${options.output || isOutputDirConfigured(settings) ? "" : chalk11.dim(" (default; the first backup asks where to keep the archive)")}`);
   try {
     const pinned = getSetting(settings, ENV.timeZone) !== void 0;
-    row("Time zone", `${resolveTimeZone(settings)}${pinned ? "" : chalk10.dim(" (this computer's; the next backup saves it)")}`);
+    row("Time zone", `${resolveTimeZone(settings)}${pinned ? "" : chalk11.dim(" (this computer's; the next backup saves it)")}`);
   } catch (error) {
-    row("Time zone", chalk10.yellow(errorMessage(error)));
+    row("Time zone", chalk11.yellow(errorMessage(error)));
   }
-  const conversationsDir = path12.join(output, "conversations");
-  const index = await readJson(path12.join(conversationsDir, "index.json"));
+  const conversationsDir = path14.join(output, "conversations");
+  const index = await readJson(path14.join(conversationsDir, "index.json"));
   let missingCount = 0;
   if (!Array.isArray(index)) {
     row("Archive", "no backup here yet");
@@ -3258,10 +3815,10 @@ async function statusCommand(options) {
     const archived = index.filter((c) => c.is_archived).length;
     const done = index.length - missing.length;
     const pct = index.length > 0 ? Math.floor(done / index.length * 100) : 100;
-    const listedAt = (await fs11.stat(path12.join(conversationsDir, "index.json"))).mtimeMs;
+    const listedAt = (await fs12.stat(path14.join(conversationsDir, "index.json"))).mtimeMs;
     row(
       "Archive",
-      `${formatCount(done)} of ${formatCount(index.length)} conversations downloaded (${pct}%)` + (archived > 0 ? `, incl. ${formatCount(archived)} archived` : "") + chalk10.dim(` \xB7 as listed ${formatDateTime(listedAt)}`)
+      `${formatCount(done)} of ${formatCount(index.length)} conversations downloaded (${pct}%)` + (archived > 0 ? `, incl. ${formatCount(archived)} archived` : "") + chalk11.dim(` \xB7 as listed ${formatDateTime(listedAt)}`)
     );
     if (missing.length > 0) {
       const times = missing.map((c) => toEpochSeconds(c.update_time)).filter((t) => t !== null).sort((a, b) => a - b);
@@ -3269,14 +3826,14 @@ async function statusCommand(options) {
       row("To do", `${formatCount(missing.length)} not downloaded yet${range}`);
     }
   }
-  const projectsDir = path12.join(output, "projects");
-  const projectNames = await fs11.readdir(projectsDir).catch(() => []);
+  const projectsDir = path14.join(output, "projects");
+  const projectNames = await fs12.readdir(projectsDir).catch(() => []);
   let projectTotal = 0;
   let projectDone = 0;
   let projectCount = 0;
   for (const name of projectNames) {
-    const dir = path12.join(projectsDir, name, "conversations");
-    const projectIndex = await readJson(path12.join(dir, "index.json"));
+    const dir = path14.join(projectsDir, name, "conversations");
+    const projectIndex = await readJson(path14.join(dir, "index.json"));
     if (!Array.isArray(projectIndex)) continue;
     const have = await downloadedIds(dir);
     projectCount += 1;
@@ -3297,27 +3854,27 @@ async function statusCommand(options) {
     row("Backlog ETA", `\u2248 ${formatDuration(Math.max(0, missingCount - Math.floor(ready)) * intervalMs)} of paced downloading`);
   }
   if (state?.throttledUntil && state.throttledUntil > now) {
-    row("Throttle", chalk10.yellow(`cooling down until ${formatClock(state.throttledUntil)} (${plural(state.consecutiveThrottles ?? 1, "429")} in a row)`));
+    row("Throttle", chalk11.yellow(`cooling down until ${formatClock(state.throttledUntil)} (${plural(state.consecutiveThrottles ?? 1, "429")} in a row)`));
   }
   const sync = await SyncStateStore.load(output);
   const parked = sync.parkedCount();
   if (parked > 0) row("Parked", `${plural(parked, "conversation")} skipped after repeated failures (backup --retry-failed)`);
   if (sync.state.lastFullListingAt) row("Full listing", formatDateTime(Date.parse(sync.state.lastFullListingAt)));
-  const meta = await readJson(path12.join(output, "metadata.json"));
+  const meta = await readJson(path14.join(output, "metadata.json"));
   if (meta && typeof meta.timestamp === "string") {
     const forkFormat = typeof meta.mode === "string";
     row(
       "Last run",
-      `${formatDateTime(Date.parse(meta.timestamp))}: ${String(meta.successfulDownloads ?? 0)} downloaded, ${String(meta.failedDownloads ?? 0)} failed` + (meta.stopReason ? ` \xB7 stopped: ${String(meta.stopReason)}` : "") + (forkFormat ? "" : chalk10.dim(" (written by the original tool; covers only its last project)"))
+      `${formatDateTime(Date.parse(meta.timestamp))}: ${String(meta.successfulDownloads ?? 0)} downloaded, ${String(meta.failedDownloads ?? 0)} failed` + (meta.stopReason ? ` \xB7 stopped: ${String(meta.stopReason)}` : "") + (forkFormat ? "" : chalk11.dim(" (written by the original tool; covers only its last project)"))
     );
   }
   const holder = await lockHolder(settings.stateDir);
-  row("Running now", holder ? chalk10.green(`yes (pid ${holder.pid}${holder.startedAt ? `, since ${formatDateTime(Date.parse(holder.startedAt))}` : ""})`) : "no");
+  row("Running now", holder ? chalk11.green(`yes (pid ${holder.pid}${holder.startedAt ? `, since ${formatDateTime(Date.parse(holder.startedAt))}` : ""})`) : "no");
   return 0;
 }
 
 // src/cli/index.ts
-var VERSION = "2.0.0-fork.7";
+var VERSION = "2.0.0-fork.8";
 function positiveNumber(flag) {
   return (value) => {
     const n = Number(value);
@@ -3349,7 +3906,7 @@ function createCli() {
     "--burst <n>",
     `downloads allowed back-to-back after a quiet period (default ${DEFAULT_BURST}, or CHATGPT_BURST)`,
     positiveInteger("--burst")
-  ).option("--max-downloads <n>", "stop after downloading this many conversations", positiveInteger("--max-downloads")).option("--since <date>", "only download conversations updated on or after this date (YYYY-MM-DD)", parseSince).option("--full", "re-download every conversation, even unchanged ones", false).option("--refresh-list", "read the whole conversation list instead of stopping at the first unchanged page", false).option("--no-archived", "skip archived chats").option("--retry-failed", "retry conversations that failed in several earlier runs", false).option("--download-files", "also download file attachments and images", false).option("--project <name-or-id>", "only back up one project").option("--no-keep-awake", "let the Mac sleep during the run (it's kept awake with caffeinate by default)").option("-t, --token <token>", "use this access token instead of the saved one").option("-v, --verbose", "also print throttling and retry details", false).addOption(new Option("--incremental", "no effect: incremental is now the default").hideHelp()).action(async (opts) => {
+  ).option("--max-downloads <n>", "stop after downloading this many conversations", positiveInteger("--max-downloads")).option("--since <date>", "only download conversations updated on or after this date (YYYY-MM-DD)", parseSince).option("--full", "re-download every conversation, even unchanged ones", false).option("--refresh-list", "read the whole conversation list instead of stopping at the first unchanged page", false).option("--no-archived", "skip archived chats").option("--retry-failed", "retry conversations that failed in several earlier runs", false).option("--download-files", "also download file attachments and images", false).option("--project <name-or-id>", "only back up one project").option("--no-keep-awake", "let the Mac sleep during the run (it's kept awake with caffeinate by default)").option("--no-digest", "skip rebuilding digest/ at the end").option("-t, --token <token>", "use this access token instead of the saved one").option("-v, --verbose", "also print throttling and retry details", false).addOption(new Option("--incremental", "no effect: incremental is now the default").hideHelp()).action(async (opts) => {
     process.exitCode = await backupCommand({
       token: opts.token,
       output: opts.output,
@@ -3364,6 +3921,7 @@ function createCli() {
       downloadFiles: opts.downloadFiles,
       project: opts.project,
       keepAwake: opts.keepAwake,
+      digest: opts.digest,
       verbose: opts.verbose
     });
   });
@@ -3390,6 +3948,11 @@ function createCli() {
   });
   program.command("convert").description("Regenerate the Markdown files and restore the files' dates from the saved JSON (no network requests)").option("-o, --output <dir>", "output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)").action(async (opts) => {
     process.exitCode = await convertCommand({ output: opts.output });
+  });
+  program.command("digest").description(
+    "Rebuild digest/: an index of every chat by month, with the messages you typed and a searchable index.html, from the saved Markdown (no network requests)"
+  ).option("-o, --output <dir>", "output folder (default: CHATGPT_EXPORT_DIR from .env, else ./chatgpt-export)").action(async (opts) => {
+    process.exitCode = await digestCommand({ output: opts.output });
   });
   return program;
 }

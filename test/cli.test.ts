@@ -93,13 +93,25 @@ test('CLI: backup reads token and output folder from config.env, then status sum
     assert.match(await fs.readFile(path.join(out, 'backup.log'), 'utf-8'), /Backup finished: 4 downloaded/);
     assert.match(await fs.readFile(path.join(home, 'config.env'), 'utf-8'), /^CHATGPT_TIMEZONE=\S+$/m, 'time zone pinned on the first run');
 
+    // The digest: INDEX.md, one month page (the fixtures are hours apart) and index.html.
+    assert.match(backup.stderr, /Digest: 3 of 3 files updated in digest\/ \(4 chats\)/);
+    assert.match(await fs.readFile(path.join(out, 'backup.log'), 'utf-8'), /Digest: 3 of 3 files updated/);
+    assert.match(await fs.readFile(path.join(out, 'digest', 'INDEX.md'), 'utf-8'), /^4 conversations, newest first/m);
+
     const convert = await runCli(['convert'], env);
     assert.equal(convert.code, 0, convert.stderr);
     assert.match(convert.stdout, /Converted 4 conversations .*: 0 Markdown files rewritten, 4 already current/);
+    assert.match(convert.stdout, /Digest: 0 of 3 files updated in digest\/ \(4 chats\)/);
 
-    const again = await runCli(['backup', '--pace', '0.05', '--no-keep-awake'], env);
+    const digest = await runCli(['digest'], env);
+    assert.equal(digest.code, 0, digest.stderr);
+    assert.match(digest.stdout, /Parsed 4 transcripts in [\d.]+ s: 4 user turns, 4 assistant turns, 1 month\./);
+    assert.match(digest.stdout, /Wrote 0 of 3 files to /);
+
+    const again = await runCli(['backup', '--pace', '0.05', '--no-keep-awake', '--no-digest'], env);
     assert.equal(again.code, 0);
     assert.match(again.stderr, /nothing new to download/);
+    assert.doesNotMatch(again.stderr, /Digest:/, '--no-digest skips it');
 
     const status = await runCli(['status'], env);
     assert.equal(status.code, 0);
