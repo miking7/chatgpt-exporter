@@ -1069,7 +1069,7 @@ async function removeStaleTempFiles(dir) {
     return;
   }
   for (const name of names) {
-    const pid = /\.(?:json|md)\.(\d+)\.tmp$/.exec(name)?.[1];
+    const pid = /\.(?:json|md|html)\.(\d+)\.tmp$/.exec(name)?.[1];
     if (pid !== void 0 && Number(pid) !== process.pid) await fs4.rm(path4.join(dir, name), { force: true });
   }
 }
@@ -2043,6 +2043,7 @@ async function buildDigest(outputDir, options = {}) {
   outputs.set("index.html", renderHtml(chats, path5.resolve(outputDir)));
   const digestDir = path5.join(outputDir, "digest");
   await fs5.mkdir(digestDir, { recursive: true });
+  await removeStaleTempFiles(digestDir);
   for (const [name, content] of outputs) if (await writeIfChanged(path5.join(digestDir, name), content)) result.written += 1;
   result.removed = (await fs5.readdir(digestDir)).filter((name) => /^\d{4}-\d{2}\.md$/.test(name) && !outputs.has(name));
   for (const name of result.removed) await fs5.rm(path5.join(digestDir, name), { force: true });

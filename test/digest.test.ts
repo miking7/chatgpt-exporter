@@ -166,6 +166,12 @@ test('digest: builds INDEX.md, month pages and index.html from a saved archive, 
 
     assert.equal((await buildDigest(out)).written, 0, 'nothing changed, nothing rewritten');
 
+    // Temp files left by a run killed mid-write are removed; the digest's own files are not.
+    await fs.writeFile(path.join(digest, 'index.html.99999999.tmp'), '');
+    await fs.writeFile(path.join(digest, 'INDEX.md.99999999.tmp'), '');
+    await buildDigest(out);
+    assert.deepEqual((await fs.readdir(digest)).sort(), ['2025-07.md', '2025-08.md', 'INDEX.md', 'index.html']);
+
     // A month with no chats left loses its page.
     for (const name of await fs.readdir(path.join(out, 'markdown'))) if (name.includes('Older chat')) await fs.rm(path.join(out, 'markdown', name));
     const after = await buildDigest(out);

@@ -344,7 +344,7 @@ export async function removeStaleTempFiles(dir: string): Promise<void> {
     return;
   }
   for (const name of names) {
-    const pid = /\.(?:json|md)\.(\d+)\.tmp$/.exec(name)?.[1];
+    const pid = /\.(?:json|md|html)\.(\d+)\.tmp$/.exec(name)?.[1];
     if (pid !== undefined && Number(pid) !== process.pid) await fs.rm(path.join(dir, name), { force: true });
   }
 }

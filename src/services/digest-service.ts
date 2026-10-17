@@ -3,7 +3,7 @@ import path from 'node:path';
 import { abortError } from '../utils/time.js';
 import { plural } from '../utils/format.js';
 import { idSuffix, suffixOfMarkdownName } from './conversation-names.js';
-import { writeAtomic } from './storage-service.js';
+import { removeStaleTempFiles, writeAtomic } from './storage-service.js';
 import { renderHtml } from './digest-html.js';
 
 /*
@@ -315,6 +315,8 @@ export async function buildDigest(outputDir: string, options: { signal?: AbortSi
 
   const digestDir = path.join(outputDir, 'digest');
   await fs.mkdir(digestDir, { recursive: true });
+  // A run killed between writing a temp file and renaming it would otherwise leave it for git to pick up.
+  await removeStaleTempFiles(digestDir);
   for (const [name, content] of outputs) if (await writeIfChanged(path.join(digestDir, name), content)) result.written += 1;
   result.removed = (await fs.readdir(digestDir)).filter((name) => /^\d{4}-\d{2}\.md$/.test(name) && !outputs.has(name));
   for (const name of result.removed) await fs.rm(path.join(digestDir, name), { force: true });
